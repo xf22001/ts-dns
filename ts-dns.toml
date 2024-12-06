@@ -15,8 +15,8 @@ max_ttl = 86400  # 最大ttl，单位为秒
 
 [groups] # 对域名进行分组
   [groups.resolver]
-  rules = ["dns.google", "doh.pub"]
-  dns = ["119.29.29.29"]  # DNS服务器列表，默认使用53端口
+  rules = ["doh.pub", "dns.alidns.com", "doh.360.cn", "dns.google", "cloudflare-dns.com"]
+  dns = ["192.168.31.1"]  # DNS服务器列表，默认使用53端口
 
   [groups.clean]
   rules = ["*.okpig.eu.org", "*.okdog.eu.org"]
