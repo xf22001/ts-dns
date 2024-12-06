@@ -1,13 +1,28 @@
 # Telescope DNS Configure File
 # https://github.com/wolf-joe/ts-dns
 
-listen = ":53"
+listen = ":52053"  # 监听地址，支持tcp/udp后缀，无后缀则同时监听tcp&udp。推荐使用命令行参数代替
 
-[groups]
+hosts_files = ["/etc/hosts"]  # hosts文件路径，支持多hosts
+[hosts] # 自定义域名映射
+"example.com" = "8.8.8.8"
+"*.example.com" = "8.8.8.8"  # 通配符Hosts
+
+[cache]  # dns缓存配置
+size = 4096  # 缓存大小，为非正数时禁用缓存
+min_ttl = 60  # 最小ttl，单位为秒
+max_ttl = 86400  # 最大ttl，单位为秒
+
+[groups] # 对域名进行分组
   [groups.clean]
-  dns = ["223.5.5.5", "114.114.114.114"]
-  concurrent = true
+  doh = ["https://doh.pub/dns-query"]  # DNS服务器列表，默认使用53端口
+  fallback = true # 设置为兜底域名组
 
   [groups.dirty]
-  dns = ["208.67.222.222:5353", "176.103.130.130:5353"]
-  gfwlist_file = "gfwlist.txt"
+  gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+  socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
+  doh = ["https://dns.google/dns-query"]  # dns over https服务器
+
+  [groups.resolver]
+  rules = ["dns.google", "doh.pub"]
+  dns = ["119.29.29.29"]  # DNS服务器列表，默认使用53端口
