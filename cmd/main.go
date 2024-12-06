@@ -4,22 +4,33 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/BurntSushi/toml"
-	"github.com/miekg/dns"
-	"github.com/sirupsen/logrus"
-	"github.com/wolf-joe/ts-dns/config"
-	"github.com/wolf-joe/ts-dns/inbound"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/BurntSushi/toml"
+	"github.com/miekg/dns"
+	"github.com/sirupsen/logrus"
+	"github.com/wolf-joe/ts-dns/config"
+	"github.com/wolf-joe/ts-dns/inbound"
 )
 
 // VERSION 程序版本号
 var VERSION = "dev"
 
 func main() {
+	file, err := os.OpenFile("ts-dns.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	defer file.Close()
+
+	// 使用 MultiWriter 同时写入到控制台和文件
+	logrus.SetOutput(io.MultiWriter(os.Stdout, file))
+
 	// 读取命令行参数
 	filename := flag.String("c", "ts-dns.toml", "config file path")
 	listen := flag.String("listen", "", "listen address/port/protocol")
