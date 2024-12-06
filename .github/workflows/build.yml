@@ -1,0 +1,67 @@
+name: Build and Upload Artifacts
+
+on:
+  workflow_dispatch:  # 手动触发
+    inputs:
+      os:
+        description: 'Select OS'
+        required: true
+        default: 'ubuntu-20.04'
+        type: choice
+        options:
+          - ubuntu-20.04
+          - ubuntu-latest
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.os }}
+    strategy:
+      matrix:
+        arch: [amd64,arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'  # 根据需要设置 Go 版本
+
+      - name: Set environment variables
+        run: |
+          echo "DEPLOYMENT=$(pwd)/build" >> $GITHUB_ENV
+          echo "GOOS=${{ github.event.inputs.os == 'windows-latest' && 'windows' || 'linux' }}" >> $GITHUB_ENV
+          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+
+      - name: Build the project
+        run: |
+          if [ "$GOOS" == "windows" ]; then
+            if [ "$GOARCH" == "amd64" ]; then
+              DEST="$DEPLOYMENT/windows64"
+            elif [ "$GOARCH" == "arm64" ]; then
+              DEST="$DEPLOYMENT/windows-arm64"
+            fi
+          else
+            if [ "$GOARCH" == "amd64" ]; then
+              DEST="$DEPLOYMENT/linux64"
+            elif [ "$GOARCH" == "arm64" ]; then
+              DEST="$DEPLOYMENT/linux-arm64"
+            fi
+          fi
+          
+          if [ -z "$DEST" ]; then
+              echo "Please set GOOS and GOARCH"
+              exit 1
+          fi
+
+          mkdir -p "$DEST"
+
+          cd cmd
+
+          go build -v -o "$DEST" -trimpath -ldflags "-w -s"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.os }}-${{ matrix.arch }}
+          path: ${{ env.DEPLOYMENT }}
