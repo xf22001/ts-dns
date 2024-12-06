@@ -20,7 +20,7 @@ max_ttl = 86400  # 最大ttl，单位为秒
 
   [groups.clean]
   rules = ["*.okpig.eu.org", "*.okdog.eu.org"]
-  doh = ["https://doh.pub/dns-query"]  # DNS服务器列表，默认使用53端口
+  doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
   fallback = true # 设置为兜底域名组
 
   [groups.dirty]
