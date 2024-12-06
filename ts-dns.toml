@@ -14,6 +14,10 @@ min_ttl = 60  # 最小ttl，单位为秒
 max_ttl = 86400  # 最大ttl，单位为秒
 
 [groups] # 对域名进行分组
+  [groups.resolver]
+  rules = ["dns.google", "doh.pub"]
+  dns = ["119.29.29.29"]  # DNS服务器列表，默认使用53端口
+
   [groups.clean]
   rules = ["*.okpig.eu.org", "*.okdog.eu.org"]
   doh = ["https://doh.pub/dns-query"]  # DNS服务器列表，默认使用53端口
@@ -23,7 +27,3 @@ max_ttl = 86400  # 最大ttl，单位为秒
   gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
   socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
   doh = ["https://dns.google/dns-query"]  # dns over https服务器
-
-  [groups.resolver]
-  rules = ["dns.google", "doh.pub"]
-  dns = ["119.29.29.29"]  # DNS服务器列表，默认使用53端口
