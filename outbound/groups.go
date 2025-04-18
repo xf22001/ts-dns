@@ -66,6 +66,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			callers:       nil,
 			concurrent:    conf.Concurrent,
 			proxy:         nil,
+			hijack:        nil,
 			fastestIP:     conf.FastestV4,
 			tcpPingPort:   conf.TCPPingPort,
 			ipSet:         nil,
@@ -112,6 +113,9 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			logrus.Debugf("set ecs(%s) for group %s", conf.ECS, err)
 			g.withECS = ecs
 		}
+
+		g.hijack = append([]string{}, conf.Hijack...)
+
 		// proxy
 		if conf.Socks5 != "" {
 			dialer, err := proxy.SOCKS5("tcp", conf.Socks5, nil, proxy.Direct)
@@ -197,6 +201,7 @@ type groupImpl struct {
 	callers    []Caller
 	concurrent bool
 	proxy      proxy.Dialer
+	hijack     []string
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
@@ -232,6 +237,34 @@ func (g *groupImpl) Match(req *dns.Msg) bool {
 	return false
 }
 
+func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
+	if msg == nil {
+		return
+	}
+
+	for _, rule := range g.hijack {
+		//logrus.Warnf("group %s", g.name)
+		parts := strings.Split(rule, "/")
+		if len(parts) != 4 || parts[0] != "" || parts[3] != "" {
+			continue // Skip invalid rule
+		}
+		source := parts[1]
+		dest := parts[2]
+
+		for i := range msg.Question {
+			if reverse == false {
+				if strings.Contains(msg.Question[i].Name, source) {
+					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, source, dest, -1)
+				}
+			} else {
+				if strings.Contains(msg.Question[i].Name, dest) {
+					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, dest, source, -1)
+				}
+			}
+		}
+	}
+}
+
 func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 	for _, question := range req.Question {
 		if g.disableQTypes[question.Qtype] {
@@ -249,6 +282,8 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 		}
 	}
 
+	g.processHijackRules(req, false)
+
 	if !g.concurrent && !g.fastestIP {
 		// 依次请求上游DNS
 		for _, caller := range g.callers {
@@ -257,6 +292,7 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
 				continue
 			}
+			g.processHijackRules(resp, true)
 			return resp
 		}
 		return nil
@@ -269,6 +305,7 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 		go func(caller Caller) {
 			resp, err := caller.Call(req)
 			if err == nil {
+				g.processHijackRules(resp, true)
 				respCh <- resp
 			} else {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)

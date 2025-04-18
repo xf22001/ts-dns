@@ -1,0 +1,94 @@
+name: Build and Upload Artifacts (Dockerized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: 'Select OS for Docker Build Environment'
+        required: true
+        default: '20.04'
+        type: choice
+        options:
+          - 20.04
+          - 22.04
+          - 24.04
+          - latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'  # 根据需要设置 Go 版本 (宿主机环境，用于 actions/setup-go 工具，容器内会重新安装)
+
+      - name: Set environment variables
+        run: |
+          echo "DEPLOYMENT=$(pwd)/build" >> $GITHUB_ENV
+          echo "DOCKER_DEPLOYMENT=/app/build" >> $GITHUB_ENV
+          echo "GOOS=linux" >> $GITHUB_ENV
+          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+
+      - name: Build the project (in Docker)
+        run: |
+          DOCKER_IMAGE="ubuntu:${{ github.event.inputs.os }}"
+
+          if [ "$GOARCH" == "amd64" ]; then
+              DEST="$DEPLOYMENT/linux64"
+              DOCKER_DEST="$DOCKER_DEPLOYMENT/linux64"
+          elif [ "$GOARCH" == "arm64" ]; then
+              DEST="$DEPLOYMENT/linux-arm64"
+              DOCKER_DEST="$DOCKER_DEPLOYMENT/linux-arm64"
+          fi
+
+          if [ -z "$DEST" ]; then
+              echo "Please set GOOS and GOARCH"
+              exit 1
+          fi
+
+          mkdir -p "$DEST"
+
+          docker run --rm \
+            -v ${{ github.workspace }}:/app \
+            -w /app/cmd \
+            -e GOOS=$GOOS \
+            -e GOARCH=$GOARCH \
+            -e VERSION=$VERSION \
+            -e TAGS="$TAGS" \
+            -e DEST="$DOCKER_DEST" \
+            $DOCKER_IMAGE \
+            /bin/bash -c "
+              apt-get update && apt-get install -y wget curl gnupg
+              wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
+              tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
+              export PATH=\$PATH:/usr/local/go/bin
+              go version
+
+              # --- Debugging: Print Environment Variables ---
+              echo \"--- Environment Variables in Docker --- \"
+              env
+              echo \"--- End of Environment Variables --- \"
+
+              # --- Debugging: Print the go build command ---
+              BUILD_COMMAND=\"go build -v -o \$DEST -trimpath -ldflags '-w -s\"
+              echo \"--- Go Build Command: --- \"
+              echo \"\$BUILD_COMMAND\"
+              echo \"--- End of Go Build Command --- \"
+
+              eval \$BUILD_COMMAND # Execute the go build command using eval
+
+              rm go1.21.0.linux-amd64.tar.gz && apt-get autoremove -y && apt-get clean
+            "
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.os }}-${{ matrix.arch }}
+          path: ${{ env.DEPLOYMENT }}
