@@ -13,24 +13,49 @@ size = 4096  # 缓存大小，为非正数时禁用缓存
 min_ttl = 60  # 最小ttl，单位为秒
 max_ttl = 86400  # 最大ttl，单位为秒
 
+[global]
+  # DoH请求的超时时间（秒），必须小于下面的总超时时间
+  http_timeout = 2
+  # 查询组处理的总超时时间（秒）
+  timeout = 5
+
 [groups] # 对域名进行分组
   [groups.resolver]
-  rules = ["doh.pub", "dns.alidns.com", "doh.360.cn", "dns.google", "cloudflare-dns.com"]
-  dns = ["192.168.31.1"]  # DNS服务器列表，默认使用53端口
-
-  [groups.clean]
-  rules = ["*.okpig.eu.org", "*.okdog.eu.org"]
-  doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
-  fallback = true # 设置为兜底域名组
+    rules = ["doh.pub", "dns.alidns.com", "doh.360.cn", "dns.google", "cloudflare-dns.com", "doh.okdog.eu.org"]
+    dns = ["192.168.31.1"]  # DNS服务器列表，默认使用53端口
 
   [groups.dirty]
-  gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
-  socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
-  socks5_fallback_direct = true # 当socks5代理失败时，尝试直连
-  doh = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"]  # dns over https服务器
+    rules = [
+      "*docker.io",
+      "*docker.com",
+      "*google.com",
+      "*google.cn",
+      "*googleusercontent.com",
+      "*gstatic.cn",
+      "*gstatic.com",
+      "*ggpht.com",
+      "*gvt1.com",
+      "*gvt2.com",
+      "*gvt3.com",
+      "*gcr.io",
+      "*withgoogle.com",
+    ]
+    gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+    socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
+    socks5_fallback_direct = true # 当socks5代理失败时，尝试直连
+    doh = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query", "https://doh.okdog.eu.org/dns-query"]  # dns over https服务器
 
   [groups.hijack]
-  rules = ["xiaofei.com"]
-  hijack = ["/xiaofei.com/www.baidu.com/"]
-  doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
+    rules = ["itv.cmvideo.cn"]
+    hijack = ["/cache.ott.ystenlive.itv.cmvideo.cn/pixman.io.ystenlive.dnsany.com/", "/cache.ott.bestlive.itv.cmvideo.cn/pixman.io.bestlive.dnsany.com/", "/cache.ott.wasulive.itv.cmvideo.cn/pixman.io.wasulive.dnsany.com/", "/cache.ott.fifalive.itv.cmvideo.cn/pixman.io.fifalive.dnsany.com/", "/cache.ott.hnbblive.itv.cmvideo.cn/pixman.io.hnbblive.dnsany.com/"]
+    doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
+
+  [groups.clean]
+    rules = [
+      "*okpig.eu.org",
+      "*okdog.eu.org",
+      "*mmglobalenergy.com",
+    ]
+    doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
+    fallback = true # 设置为兜底域名组
 
