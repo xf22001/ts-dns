@@ -167,6 +167,7 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 		matched  outbound.IGroup
 		fallback bool
 		redirect outbound.IGroup
+		caller   string // Add caller field for logging
 	}{}
 	begin := time.Now()
 	defer func() {
@@ -197,6 +198,9 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 		if _info.redirect != nil {
 			fields["redir"] = _info.redirect.Name()
 		}
+		if _info.caller != "" { // Add caller to log fields if available
+			fields["caller"] = _info.caller
+		}
 		if resp == nil {
 			fields["answer"] = "nil"
 		} else {
@@ -226,31 +230,42 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 
 	// handle by matched group
 	var matched outbound.IGroup
+	var result *outbound.HandleResult
 	for _, group := range h.groups {
 		if group.Match(req) {
 			matched = group
-			resp = group.Handle(req)
+			result = group.Handle(req)
 			break
 		}
 	}
 	if matched == nil {
 		matched = h.fallbackGroup
-		resp = h.fallbackGroup.Handle(req)
+		result = h.fallbackGroup.Handle(req)
 		_info.fallback = true
 	}
 	_info.matched = matched
+	if result != nil {
+		resp = result.Msg
+		_info.caller = result.CallerName
+	}
 
 	// redirect
 	if h.redirector != nil {
 		if group := h.redirector(matched, req, resp); group != nil {
 			matched = group
-			resp = group.Handle(req)
+			result = group.Handle(req)
 			_info.redirect = group
+			if result != nil {
+				resp = result.Msg
+				_info.caller = result.CallerName
+			}
 		}
 	}
 
 	// finally
-	matched.PostProcess(req, resp)
+	if matched != nil {
+		matched.PostProcess(req, resp)
+	}
 	h.cache.Set(req, resp)
 	return resp
 }

@@ -22,10 +22,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// HandleResult encapsulates the result of a group's handle operation.
+type HandleResult struct {
+	Msg        *dns.Msg
+	CallerName string
+}
+
 type IGroup interface {
 	Match(req *dns.Msg) bool
 	IsFallback() bool
-	Handle(req *dns.Msg) *dns.Msg
+	Handle(req *dns.Msg) *HandleResult
 	PostProcess(req *dns.Msg, resp *dns.Msg)
 	Start(resolver dns.Handler)
 	Stop()
@@ -215,6 +221,12 @@ type groupImpl struct {
 	stopped chan struct{}
 }
 
+// callerResult holds the DNS message and the name of the caller that provided it.
+type callerResult struct {
+	Msg        *dns.Msg
+	CallerName string
+}
+
 func (g *groupImpl) Name() string     { return g.name }
 func (g *groupImpl) String() string   { return "group_" + g.Name() }
 func (g *groupImpl) IsFallback() bool { return g.fallback }
@@ -267,7 +279,7 @@ func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
 	}
 }
 
-func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
+func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
 	for _, question := range req.Question {
 		if g.disableQTypes[question.Qtype] {
 			return nil // disabled
@@ -295,23 +307,23 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 				continue
 			}
 			g.processHijackRules(resp, true)
-			return resp
+			return &HandleResult{Msg: resp, CallerName: caller.String()}
 		}
 		return nil
 	}
 
 	// 并发请求上游DNS
 	chLen := len(g.callers)
-	respCh := make(chan *dns.Msg, chLen)
+	respCh := make(chan *callerResult, chLen)
 	for _, caller := range g.callers {
 		go func(caller Caller) {
 			resp, err := caller.Call(req)
 			if err == nil {
 				g.processHijackRules(resp, true)
-				respCh <- resp
+				respCh <- &callerResult{Msg: resp, CallerName: caller.String()}
 			} else {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
-				respCh <- nil
+				respCh <- nil // Send nil if error, meaning no valid *callerResult
 			}
 		}(caller)
 	}
@@ -326,31 +338,35 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 	}
 	// 无需测速，只需返回第一个不为nil的DNS响应
 	for i := 0; i < chLen; i++ {
-		if resp := <-respCh; resp != nil {
-			return resp
+		if cr := <-respCh; cr != nil {
+			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 		}
 	}
 	return nil
 }
 
-func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *dns.Msg {
+func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen int) *HandleResult {
 	const (
 		maxGoNum    = 15 // 最大并发量
 		pingTimeout = 500 * time.Millisecond
 	)
 	// 从resp ch中提取所有IP地址，并建立IP地址到resp的映射
 	allIP := make([]string, 0, maxGoNum)
-	respMap := make(map[string]*dns.Msg, maxGoNum)
-	var firstResp *dns.Msg // 最早抵达的msg，当测速失败时返回该响应
+	respMap := make(map[string]*callerResult, maxGoNum) // Change type
+	var firstCR *callerResult // Store the first callerResult
+	var firstResp *dns.Msg    // 最早抵达的msg，当测速失败时返回该响应
+	var firstRespCallerName string
 	for i := 0; i < chLen; i++ {
-		resp := <-respCh
-		if resp == nil {
+		cr := <-respCh // Changed resp to cr
+		if cr == nil {
 			continue
 		}
-		if firstResp == nil {
-			firstResp = resp
+		if firstCR == nil { // Store the first callerResult
+			firstCR = cr
+			firstResp = cr.Msg
+			firstRespCallerName = cr.CallerName
 		}
-		for _, answer := range resp.Answer {
+		for _, answer := range cr.Msg.Answer { // Access cr.Msg
 			var ip string
 			switch rr := answer.(type) {
 			case *dns.A:
@@ -365,7 +381,7 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *
 			if ip != "" {
 				allIP = append(allIP, ip)
 				if _, exists := respMap[ip]; !exists {
-					respMap[ip] = resp
+					respMap[ip] = cr // Store callerResult
 					if len(respMap) >= maxGoNum {
 						goto doPing
 					}
@@ -376,18 +392,27 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *
 doPing:
 	switch len(respMap) {
 	case 0: // 没有任何IP地址
-		return firstResp
+		if firstResp == nil {
+			return nil
+		}
+		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
 	case 1: // 只有一个IPv4地址
-		for _, resp := range respMap {
-			return resp
+		for _, cr := range respMap {
+			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 		}
 	}
 	fastestIP, cost, err := utils.FastestPingIP(allIP, g.tcpPingPort, pingTimeout)
 	if err != nil {
-		return firstResp
+		if firstResp == nil {
+			return nil
+		}
+		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
 	}
 	logrus.Debugf("fastest ip of %s: %s(%dms)", allIP, fastestIP, cost)
-	msg := respMap[fastestIP]
+	chosenCR := respMap[fastestIP]         // Get the chosen callerResult
+	msg := chosenCR.Msg                   // Get Msg from callerResult
+	chosenCallerName := chosenCR.CallerName // Get CallerName
+
 	// 删除msg内除fastestIP之外的其它IP记录
 	for i := 0; i < len(msg.Answer); i++ {
 		switch rr := msg.Answer[i].(type) {
@@ -405,7 +430,7 @@ doPing:
 		msg.Answer = append(msg.Answer[:i], msg.Answer[i+1:]...)
 		i--
 	}
-	return msg
+	return &HandleResult{Msg: msg, CallerName: chosenCallerName}
 }
 
 func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {

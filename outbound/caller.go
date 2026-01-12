@@ -57,14 +57,14 @@ func (caller *DNSCaller) Call(request *dns.Msg) (r *dns.Msg, err error) {
 	proxyConn, err = caller.proxy.Dial("tcp", caller.server)
 	if err != nil {
 		if caller.socks5FallbackDirect {
-			logrus.Warnf("DNSCaller %s proxy dial failed: %v, attempting direct connection", caller.server, err)
+			// logrus.Warnf("DNSCaller %s proxy dial failed: %v, attempting direct connection", caller.server, err)
 			// Attempt direct connection
 			client := &dns.Client{Net: caller.client.Net} // Create a new client without proxy
 			r, _, directErr := client.Exchange(request, caller.server)
 			if directErr == nil {
 				return r, nil
 			}
-			logrus.Warnf("DNSCaller %s direct connection also failed: %v", caller.server, directErr)
+			// logrus.Warnf("DNSCaller %s direct connection also failed: %v", caller.server, directErr)
 		}
 		return nil, err // Original proxy error or direct connection failed
 	}
@@ -241,7 +241,7 @@ func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
 
 	if err != nil {
 		if caller.socks5FallbackDirect {
-			logrus.Warnf("DoHCallerV2 %s proxy call failed: %v, attempting direct connection", caller.url, err)
+			// logrus.Warnf("DoHCallerV2 %s proxy call failed: %v, attempting direct connection", caller.url, err)
 			// --- Fallback to direct connection ---
 			directClient := &http.Client{Transport: &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -253,7 +253,7 @@ func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
 				resp = directResp // Use the successful direct response
 				err = nil         // Clear the error
 			} else {
-				logrus.Warnf("DoHCallerV2 %s direct connection also failed: %v", caller.url, directErr)
+				// logrus.Warnf("DoHCallerV2 %s direct connection also failed: %v", caller.url, directErr)
 				return nil, err // Both failed, return original proxy error
 			}
 		} else {
