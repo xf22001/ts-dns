@@ -56,23 +56,24 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			seenGFWList = true
 		}
 		g := &groupImpl{
-			name:          name,
-			fallback:      conf.Fallback,
-			matcher:       nil,
-			gfwList:       nil,
-			gfwListURL:    conf.GFWListURL,
-			noCookie:      conf.NoCookie,
-			withECS:       nil,
-			callers:       nil,
-			concurrent:    conf.Concurrent,
-			proxy:         nil,
-			hijack:        nil,
-			fastestIP:     conf.FastestV4,
-			tcpPingPort:   conf.TCPPingPort,
-			ipSet:         nil,
-			stopCh:        make(chan struct{}),
-			stopped:       make(chan struct{}),
-			disableQTypes: map[uint16]bool{},
+			name:                 name,
+			fallback:             conf.Fallback,
+			matcher:              nil,
+			gfwList:              nil,
+			gfwListURL:           conf.GFWListURL,
+			noCookie:             conf.NoCookie,
+			withECS:              nil,
+			callers:              nil,
+			concurrent:           conf.Concurrent,
+			proxy:                nil,
+			socks5FallbackDirect: conf.Socks5FallbackDirect,
+			hijack:               nil,
+			fastestIP:            conf.FastestV4,
+			tcpPingPort:          conf.TCPPingPort,
+			ipSet:                nil,
+			stopCh:               make(chan struct{}),
+			stopped:              make(chan struct{}),
+			disableQTypes:        map[uint16]bool{},
 		}
 		// disable query types
 		if conf.DisableIPv6 {
@@ -136,7 +137,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				if !strings.Contains(addr, ":") {
 					addr += ":53"
 				}
-				callers = append(callers, NewDNSCaller(addr, network, g.proxy))
+				callers = append(callers, NewDNSCaller(addr, network, g.proxy, g.socks5FallbackDirect))
 			}
 		}
 		for _, addr := range conf.DoT { // dns over tls服务器，格式为ip:port@serverName
@@ -150,11 +151,11 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				if !strings.Contains(addr, ":") {
 					addr += ":853"
 				}
-				callers = append(callers, NewDoTCaller(addr, serverName, g.proxy))
+				callers = append(callers, NewDoTCaller(addr, serverName, g.proxy, g.socks5FallbackDirect))
 			}
 		}
 		for _, addr := range conf.DoH { // dns over https服务器
-			caller, err := NewDoHCallerV2(addr, g.proxy)
+			caller, err := NewDoHCallerV2(addr, g.proxy, g.socks5FallbackDirect)
 			if err != nil {
 				return nil, fmt.Errorf("build doh caller %s failed: %w", addr, err)
 			}
@@ -198,10 +199,11 @@ type groupImpl struct {
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
 
-	callers    []Caller
-	concurrent bool
-	proxy      proxy.Dialer
-	hijack     []string
+	callers              []Caller
+	concurrent           bool
+	proxy                proxy.Dialer
+	socks5FallbackDirect bool
+	hijack               []string
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping

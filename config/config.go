@@ -33,11 +33,13 @@ type Group struct {
 	GFWListURL  string   `toml:"gfwlist_url"`
 	Fallback    bool     `toml:"fallback"`
 
-	Socks5 string   `toml:"socks5"`
-	DNS    []string `toml:"dns"`
-	DoT    []string `toml:"dot"`
-	DoH    []string `toml:"doh"`
-	Hijack []string `toml:"hijack"`
+	Socks5 string `toml:"socks5"`
+
+	Socks5FallbackDirect bool     `toml:"socks5_fallback_direct"`
+	DNS                  []string `toml:"dns"`
+	DoT                  []string `toml:"dot"`
+	DoH                  []string `toml:"doh"`
+	Hijack               []string `toml:"hijack"`
 
 	Concurrent  bool `toml:"concurrent"`
 	FastestV4   bool `toml:"fastest_v4"`
