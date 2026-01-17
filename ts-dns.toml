@@ -2,8 +2,8 @@
 # https://github.com/wolf-joe/ts-dns
 
 listen = ":52053"  # 监听地址，支持tcp/udp后缀，无后缀则同时监听tcp&udp。推荐使用命令行参数代替
-# ssl_cert_file = "ssl/cert.pem"  # SSL证书文件路径，配置后启用DoH
-# ssl_key_file = "ssl/key.pem"    # SSL密钥文件路径，配置后启用DoH
+ssl_cert_file = "~/ssl/okpig.eu.org/cert.pem"  # SSL证书文件路径，配置后启用DoH
+ssl_key_file = "~/ssl/okpig.eu.org/key.pem"    # SSL密钥文件路径，配置后启用DoH
 # DOH endpoint will be available at https://<listen_address>/dns-query
 
 hosts_files = ["/etc/hosts"]  # hosts文件路径，支持多hosts
