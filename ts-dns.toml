@@ -2,6 +2,9 @@
 # https://github.com/wolf-joe/ts-dns
 
 listen = ":52053"  # 监听地址，支持tcp/udp后缀，无后缀则同时监听tcp&udp。推荐使用命令行参数代替
+# ssl_cert_file = "ssl/cert.pem"  # SSL证书文件路径，配置后启用DoH
+# ssl_key_file = "ssl/key.pem"    # SSL密钥文件路径，配置后启用DoH
+# DOH endpoint will be available at https://<listen_address>/dns-query
 
 hosts_files = ["/etc/hosts"]  # hosts文件路径，支持多hosts
 [hosts] # 自定义域名映射
@@ -21,7 +24,7 @@ max_ttl = 86400  # 最大ttl，单位为秒
 
 [groups] # 对域名进行分组
   [groups.resolver]
-    rules = ["doh.pub", "dns.alidns.com", "doh.360.cn", "dns.google", "cloudflare-dns.com", "doh.okdog.eu.org"]
+    rules = ["dns.alidns.com", "doh.pub", "doh.360.cn", "dns.google", "cloudflare-dns.com", "doh.okdog.eu.org"]
     dns = ["192.168.31.1"]  # DNS服务器列表，默认使用53端口
 
   [groups.dirty]
@@ -40,7 +43,7 @@ max_ttl = 86400  # 最大ttl，单位为秒
       "*gcr.io",
       "*withgoogle.com",
     ]
-    gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+    # gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
     socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
     socks5_fallback_direct = true # 当socks5代理失败时，尝试直连
     doh = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query", "https://doh.okdog.eu.org/dns-query"]  # dns over https服务器
@@ -48,7 +51,7 @@ max_ttl = 86400  # 最大ttl，单位为秒
   [groups.hijack]
     rules = ["itv.cmvideo.cn"]
     hijack = ["/cache.ott.ystenlive.itv.cmvideo.cn/pixman.io.ystenlive.dnsany.com/", "/cache.ott.bestlive.itv.cmvideo.cn/pixman.io.bestlive.dnsany.com/", "/cache.ott.wasulive.itv.cmvideo.cn/pixman.io.wasulive.dnsany.com/", "/cache.ott.fifalive.itv.cmvideo.cn/pixman.io.fifalive.dnsany.com/", "/cache.ott.hnbblive.itv.cmvideo.cn/pixman.io.hnbblive.dnsany.com/"]
-    doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
+    doh = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
 
   [groups.clean]
     rules = [
@@ -56,6 +59,5 @@ max_ttl = 86400  # 最大ttl，单位为秒
       "*okdog.eu.org",
       "*mmglobalenergy.com",
     ]
-    doh = ["https://doh.pub/dns-query", "https://dns.alidns.com/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
+    doh = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query", "https://doh.360.cn"]  # DNS服务器列表，默认使用53端口
     fallback = true # 设置为兜底域名组
-
