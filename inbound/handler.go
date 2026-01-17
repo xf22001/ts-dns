@@ -205,11 +205,29 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 			fields["answer"] = "nil"
 		} else {
 			fields["answer"] = len(resp.Answer)
+			if logrus.IsLevelEnabled(logrus.DebugLevel) {
+				var resolvedIPs []string
+				for _, rr := range resp.Answer {
+					switch v := rr.(type) {
+					case *dns.A:
+						resolvedIPs = append(resolvedIPs, v.A.String())
+					case *dns.AAAA:
+						resolvedIPs = append(resolvedIPs, v.AAAA.String())
+					}
+				}
+				if len(resolvedIPs) > 0 {
+					fields["resolved_ips"] = strings.Join(resolvedIPs, ", ")
+				}
+			}
 		}
 		if _info.blocked || _info.hitCache || _info.hitHosts {
 			logrus.WithFields(fields).Debug()
 		} else {
-			logrus.WithFields(fields).Info()
+			if logrus.IsLevelEnabled(logrus.DebugLevel) {
+				logrus.WithFields(fields).Debug()
+			} else {
+				logrus.WithFields(fields).Info()
+			}
 		}
 	}()
 	// endregion
