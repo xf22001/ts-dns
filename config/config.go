@@ -10,7 +10,9 @@ type Conf struct {
 	DisableQTypes []string                  `toml:"disable_qtypes"`
 	Redirectors   map[string]RedirectorConf `toml:"redirectors"`
 
-	Listen string `toml:"listen"`
+	Listen      string `toml:"listen"`
+	SSLCertFile string `toml:"ssl_cert_file"`
+	SSLKeyFile  string `toml:"ssl_key_file"`
 }
 
 // CacheConf 配置文件中cache section对应的结构

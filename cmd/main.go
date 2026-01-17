@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -14,6 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
+	"github.com/soheilhy/cmux"
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/inbound"
 )
@@ -73,26 +79,138 @@ func main() {
 	signal.Notify(signCh, syscall.SIGHUP)
 	go reloadConf(signCh, filename, handler)
 
-	// 启动服务
+	run(&conf, handler, addr, network)
+}
+
+func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
+	// Check if SSL certificate and key files are configured to enable DoH
+	enableDoh := conf.SSLCertFile != "" && conf.SSLKeyFile != ""
+
+	if !enableDoh {
+		// original logic without doh
+		wg := sync.WaitGroup{}
+		runSrv := func(net string) {
+			defer wg.Done()
+			srv := &dns.Server{Addr: addr, Net: net, Handler: handler}
+			logrus.Infof("listen on %s/%s", addr, net)
+			if err := srv.ListenAndServe(); err != nil {
+				logrus.Errorf("service stopped: %+v", err)
+			}
+		}
+		if network != "" {
+			wg.Add(1)
+			go runSrv(network)
+		} else {
+			wg.Add(2)
+			go runSrv("udp")
+			go runSrv("tcp")
+		}
+		wg.Wait()
+		logrus.Infof("ts-dns exists")
+		return
+	}
+
+	// new logic with cmux
+	certFile, keyFile := expandHome(conf.SSLCertFile), expandHome(conf.SSLKeyFile)
+	if _, err := os.Stat(certFile); err != nil {
+		logrus.Warnf("cert file not found, fallback to non-doh mode: %s", certFile)
+		// Create a temporary config without SSL to run without DoH
+		tempConf := *conf
+		tempConf.SSLCertFile = ""
+		tempConf.SSLKeyFile = ""
+		run(&tempConf, handler, addr, network)
+		return
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		logrus.Warnf("key file not found, fallback to non-doh mode: %s", keyFile)
+		// Create a temporary config without SSL to run without DoH
+		tempConf := *conf
+		tempConf.SSLCertFile = ""
+		tempConf.SSLKeyFile = ""
+		run(&tempConf, handler, addr, network)
+		return
+	}
+
 	wg := sync.WaitGroup{}
-	runSrv := func(net string) {
-		defer wg.Done()
-		srv := &dns.Server{Addr: addr, Net: net, Handler: handler}
-		logrus.Infof("listen on %s/%s", addr, net)
-		if err = srv.ListenAndServe(); err != nil {
-			logrus.Errorf("service stopped: %+v", err)
+	// start udp server
+	if network == "" || network == "udp" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv := &dns.Server{Addr: addr, Net: "udp", Handler: handler}
+			logrus.Infof("listen on %s/udp", addr)
+			if err := srv.ListenAndServe(); err != nil {
+				logrus.Fatalf("udp service stopped: %+v", err)
+			}
+		}()
+	}
+
+	// start multiplexer on tcp
+	if network == "" || network == "tcp" {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			logrus.Fatalf("listen on %s/tcp failed: %v", addr, err)
+		}
+		defer l.Close()
+
+		m := cmux.New(l)
+		tlsListener := m.Match(cmux.TLS())
+		anyListener := m.Match(cmux.Any())
+
+		// start doh server
+		dohHandler := inbound.NewDohHandler(handler)
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			logrus.Fatalf("load cert failed: %v", err)
+		}
+		dohServer := &http.Server{
+			Handler: dohHandler,
+			TLSConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			},
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logrus.Infof("listen on %s/dns-query", addr)
+			if err := dohServer.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
+				logrus.Fatalf("doh service stopped: %+v", err)
+			}
+		}()
+
+		// start tcp dns server
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logrus.Infof("listen on %s/tcp", addr)
+			if err := dns.ActivateAndServe(anyListener, nil, handler); err != nil {
+				logrus.Fatalf("tcp service stopped: %+v", err)
+			}
+		}()
+
+		logrus.Infof("start cmux server on %s", addr)
+		if err := m.Serve(); err != nil {
+			logrus.Fatalf("cmux server failed: %v", err)
 		}
 	}
-	if network != "" {
-		wg.Add(1)
-		go runSrv(network)
-	} else {
-		wg.Add(2)
-		go runSrv("udp")
-		go runSrv("tcp")
-	}
+
 	wg.Wait()
 	logrus.Infof("ts-dns exists")
+}
+
+// expandHome expands the path to include the home directory if the path
+// starts with `~`. If it doesn't, the path is returned as-is.
+func expandHome(path string) string {
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+
+	usr, err := user.Current()
+	if err != nil {
+		logrus.Warnf("Could not get current user: %v", err)
+		return path
+	}
+	return filepath.Join(usr.HomeDir, path[1:])
 }
 
 func reloadConf(ch chan os.Signal, filename *string, handler inbound.IHandler) {

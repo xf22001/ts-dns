@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -263,7 +263,7 @@ func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
 
 	defer func() { _ = resp.Body.Close() }()
 	var body []byte
-	if body, err = ioutil.ReadAll(resp.Body); err != nil {
+	if body, err = io.ReadAll(resp.Body); err != nil {
 		return nil, err
 	}
 	msg := new(dns.Msg)

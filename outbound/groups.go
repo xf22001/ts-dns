@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -479,7 +479,7 @@ func (g *groupImpl) grabGFWList() *matcher.ABPlus {
 		logrus.Warnf("get gfw list %q failed, status_code: %d", g.gfwListURL, resp.StatusCode)
 		return nil
 	}
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logrus.Warnf("read gfw list %q failed, error: %+v", g.gfwListURL, err)
 		return nil
