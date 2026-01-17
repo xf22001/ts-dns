@@ -2,6 +2,9 @@
 # https://github.com/wolf-joe/ts-dns
 
 listen = ":53"
+# ssl_cert_file = "ssl/cert.pem"  # SSL证书文件路径，配置后启用DoH
+# ssl_key_file = "ssl/key.pem"    # SSL密钥文件路径，配置后启用DoH
+# DOH endpoint will be available at https://<listen_address>/dns-query
 
 [groups]
   [groups.clean]

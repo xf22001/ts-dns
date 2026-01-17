@@ -6,15 +6,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/sirupsen/logrus"
-	"github.com/wolf-joe/ts-dns/utils"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
+	"github.com/wolf-joe/ts-dns/utils"
 
 	"github.com/miekg/dns"
 	"github.com/valyala/fastrand"
@@ -36,10 +37,11 @@ var (
 
 // DNSCaller UDP/TCP/DOT请求类
 type DNSCaller struct {
-	client *dns.Client
-	server string
-	proxy  proxy.Dialer
-	conn   *dns.Conn
+	client               *dns.Client
+	server               string
+	proxy                proxy.Dialer
+	socks5FallbackDirect bool
+	conn                 *dns.Conn
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
@@ -52,8 +54,19 @@ func (caller *DNSCaller) Call(request *dns.Msg) (r *dns.Msg, err error) {
 	}
 	// 通过代理连接代理服务器
 	var proxyConn net.Conn
-	if proxyConn, err = caller.proxy.Dial("tcp", caller.server); err != nil {
-		return nil, err
+	proxyConn, err = caller.proxy.Dial("tcp", caller.server)
+	if err != nil {
+		if caller.socks5FallbackDirect {
+			// logrus.Warnf("DNSCaller %s proxy dial failed: %v, attempting direct connection", caller.server, err)
+			// Attempt direct connection
+			client := &dns.Client{Net: caller.client.Net} // Create a new client without proxy
+			r, _, directErr := client.Exchange(request, caller.server)
+			if directErr == nil {
+				return r, nil
+			}
+			// logrus.Warnf("DNSCaller %s direct connection also failed: %v", caller.server, directErr)
+		}
+		return nil, err // Original proxy error or direct connection failed
 	}
 	defer func() { _ = proxyConn.Close() }()
 	// 打包连接
@@ -77,26 +90,28 @@ func (caller *DNSCaller) String() string {
 }
 
 // NewDNSCaller 创建一个UDP/TCP Caller，需要服务器地址（ip+端口）、网络类型（udp、tcp），可选代理
-func NewDNSCaller(server, network string, proxy proxy.Dialer) *DNSCaller {
+func NewDNSCaller(server, network string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
 	client := &dns.Client{Net: network}
-	return &DNSCaller{client: client, server: server, proxy: proxy, conn: &dns.Conn{}}
+	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect, conn: &dns.Conn{}}
 }
 
 // NewDoTCaller 创建一个DoT Caller，需要服务器地址（ip+端口）、证书名称，可选代理
-func NewDoTCaller(server, serverName string, proxy proxy.Dialer) *DNSCaller {
+func NewDoTCaller(server, serverName string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
 	client := &dns.Client{Net: "tcp-tls", TLSConfig: &tls.Config{ServerName: serverName}}
-	return &DNSCaller{client: client, server: server, proxy: proxy, conn: &dns.Conn{}}
+	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect, conn: &dns.Conn{}}
 }
 
 // DoHCallerV2 DoT请求类，通过resolver自动解析域名
 type DoHCallerV2 struct {
-	host     string
-	port     string
-	url      string
-	clients  []*http.Client
-	rwMux    sync.RWMutex
-	resolver dns.Handler
-	dialer   proxy.Dialer
+	host                 string
+	port                 string
+	url                  string
+	clients              []*http.Client
+	rwMux                sync.RWMutex
+	resolver             dns.Handler
+	dialer               proxy.Dialer
+	directDialer         net.Dialer
+	socks5FallbackDirect bool
 
 	satisfyCh chan interface{} // 域名解析完成
 	requireCh chan *dns.Msg    // 要求解析域名
@@ -205,34 +220,52 @@ CHOICE:
 
 // Call 向上游DNS转发请求
 func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
+	// --- Original logic using proxy ---
 	client := caller.getClient(request)
 	if client == nil {
 		return nil, errors.New("empty client for doh caller")
 	}
-	// 解包dns请求
 	var buf []byte
 	if buf, err = request.Pack(); err != nil {
 		return nil, err
 	}
-	// 打包http请求
 	var req *http.Request
 	contentType, payload := "application/dns-message", bytes.NewBuffer(buf)
 	if req, err = http.NewRequest("POST", caller.url, payload); err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	// 发送http请求
+
 	var resp *http.Response
-	if resp, err = client.Do(req); err != nil {
-		return nil, err
+	resp, err = client.Do(req)
+
+	if err != nil {
+		if caller.socks5FallbackDirect {
+			// logrus.Warnf("DoHCallerV2 %s proxy call failed: %v, attempting direct connection", caller.url, err)
+			// --- Fallback to direct connection ---
+			directClient := &http.Client{Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return caller.directDialer.DialContext(ctx, network, addr)
+				},
+			}}
+			directResp, directErr := directClient.Do(req)
+			if directErr == nil {
+				resp = directResp // Use the successful direct response
+				err = nil         // Clear the error
+			} else {
+				// logrus.Warnf("DoHCallerV2 %s direct connection also failed: %v", caller.url, directErr)
+				return nil, err // Both failed, return original proxy error
+			}
+		} else {
+			return nil, err // Not configured for fallback, return proxy error
+		}
 	}
+
 	defer func() { _ = resp.Body.Close() }()
-	// 解包http响应
 	var body []byte
-	if body, err = ioutil.ReadAll(resp.Body); err != nil {
+	if body, err = io.ReadAll(resp.Body); err != nil {
 		return nil, err
 	}
-	// 打包dns响应
 	msg := new(dns.Msg)
 	if err = msg.Unpack(body); err != nil {
 		return nil, err
@@ -258,7 +291,7 @@ func (caller *DoHCallerV2) SetResolver(resolver dns.Handler) {
 }
 
 // NewDoHCallerV2 创建一个DoHCaller，需要服务器url，可选代理
-func NewDoHCallerV2(rawURL string, dialer proxy.Dialer) (*DoHCallerV2, error) {
+func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer, socks5FallbackDirect bool) (*DoHCallerV2, error) {
 	// 解析url
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -276,11 +309,23 @@ func NewDoHCallerV2(rawURL string, dialer proxy.Dialer) (*DoHCallerV2, error) {
 		return nil, err
 	}
 
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: time.Second * 3}
+	directDialer := net.Dialer{Timeout: 3 * time.Second} // Default direct dialer timeout
+
+	// If no proxyDialer is provided, use directDialer as the main dialer
+	// Otherwise, keep proxyDialer as the main dialer
+	if proxyDialer == nil {
+		proxyDialer = &directDialer
 	}
-	caller := &DoHCallerV2{host: host, port: port, url: u.String(),
-		rwMux: sync.RWMutex{}, dialer: dialer}
+
+	caller := &DoHCallerV2{
+		host:                 host,
+		port:                 port,
+		url:                  u.String(),
+		rwMux:                sync.RWMutex{},
+		dialer:               proxyDialer,
+		directDialer:         directDialer, // Store a direct dialer for fallback
+		socks5FallbackDirect: socks5FallbackDirect,
+	}
 	caller.requireCh = make(chan *dns.Msg, 1)
 	caller.satisfyCh = make(chan interface{}, 1)
 	caller.cancelCh = make(chan interface{}, 1)

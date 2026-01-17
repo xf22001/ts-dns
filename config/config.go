@@ -10,7 +10,9 @@ type Conf struct {
 	DisableQTypes []string                  `toml:"disable_qtypes"`
 	Redirectors   map[string]RedirectorConf `toml:"redirectors"`
 
-	Listen string `toml:"listen"`
+	Listen      string `toml:"listen"`
+	SSLCertFile string `toml:"ssl_cert_file"`
+	SSLKeyFile  string `toml:"ssl_key_file"`
 }
 
 // CacheConf 配置文件中cache section对应的结构
@@ -33,10 +35,13 @@ type Group struct {
 	GFWListURL  string   `toml:"gfwlist_url"`
 	Fallback    bool     `toml:"fallback"`
 
-	Socks5 string   `toml:"socks5"`
-	DNS    []string `toml:"dns"`
-	DoT    []string `toml:"dot"`
-	DoH    []string `toml:"doh"`
+	Socks5 string `toml:"socks5"`
+
+	Socks5FallbackDirect bool     `toml:"socks5_fallback_direct"`
+	DNS                  []string `toml:"dns"`
+	DoT                  []string `toml:"dot"`
+	DoH                  []string `toml:"doh"`
+	Hijack               []string `toml:"hijack"`
 
 	Concurrent  bool `toml:"concurrent"`
 	FastestV4   bool `toml:"fastest_v4"`

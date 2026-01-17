@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -22,10 +22,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// HandleResult encapsulates the result of a group's handle operation.
+type HandleResult struct {
+	Msg        *dns.Msg
+	CallerName string
+}
+
 type IGroup interface {
 	Match(req *dns.Msg) bool
 	IsFallback() bool
-	Handle(req *dns.Msg) *dns.Msg
+	Handle(req *dns.Msg) *HandleResult
 	PostProcess(req *dns.Msg, resp *dns.Msg)
 	Start(resolver dns.Handler)
 	Stop()
@@ -56,22 +62,24 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			seenGFWList = true
 		}
 		g := &groupImpl{
-			name:          name,
-			fallback:      conf.Fallback,
-			matcher:       nil,
-			gfwList:       nil,
-			gfwListURL:    conf.GFWListURL,
-			noCookie:      conf.NoCookie,
-			withECS:       nil,
-			callers:       nil,
-			concurrent:    conf.Concurrent,
-			proxy:         nil,
-			fastestIP:     conf.FastestV4,
-			tcpPingPort:   conf.TCPPingPort,
-			ipSet:         nil,
-			stopCh:        make(chan struct{}),
-			stopped:       make(chan struct{}),
-			disableQTypes: map[uint16]bool{},
+			name:                 name,
+			fallback:             conf.Fallback,
+			matcher:              nil,
+			gfwList:              nil,
+			gfwListURL:           conf.GFWListURL,
+			noCookie:             conf.NoCookie,
+			withECS:              nil,
+			callers:              nil,
+			concurrent:           conf.Concurrent,
+			proxy:                nil,
+			socks5FallbackDirect: conf.Socks5FallbackDirect,
+			hijack:               nil,
+			fastestIP:            conf.FastestV4,
+			tcpPingPort:          conf.TCPPingPort,
+			ipSet:                nil,
+			stopCh:               make(chan struct{}),
+			stopped:              make(chan struct{}),
+			disableQTypes:        map[uint16]bool{},
 		}
 		// disable query types
 		if conf.DisableIPv6 {
@@ -112,6 +120,9 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			logrus.Debugf("set ecs(%s) for group %s", conf.ECS, err)
 			g.withECS = ecs
 		}
+
+		g.hijack = append([]string{}, conf.Hijack...)
+
 		// proxy
 		if conf.Socks5 != "" {
 			dialer, err := proxy.SOCKS5("tcp", conf.Socks5, nil, proxy.Direct)
@@ -132,7 +143,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				if !strings.Contains(addr, ":") {
 					addr += ":53"
 				}
-				callers = append(callers, NewDNSCaller(addr, network, g.proxy))
+				callers = append(callers, NewDNSCaller(addr, network, g.proxy, g.socks5FallbackDirect))
 			}
 		}
 		for _, addr := range conf.DoT { // dns over tls服务器，格式为ip:port@serverName
@@ -146,11 +157,11 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				if !strings.Contains(addr, ":") {
 					addr += ":853"
 				}
-				callers = append(callers, NewDoTCaller(addr, serverName, g.proxy))
+				callers = append(callers, NewDoTCaller(addr, serverName, g.proxy, g.socks5FallbackDirect))
 			}
 		}
 		for _, addr := range conf.DoH { // dns over https服务器
-			caller, err := NewDoHCallerV2(addr, g.proxy)
+			caller, err := NewDoHCallerV2(addr, g.proxy, g.socks5FallbackDirect)
 			if err != nil {
 				return nil, fmt.Errorf("build doh caller %s failed: %w", addr, err)
 			}
@@ -194,9 +205,11 @@ type groupImpl struct {
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
 
-	callers    []Caller
-	concurrent bool
-	proxy      proxy.Dialer
+	callers              []Caller
+	concurrent           bool
+	proxy                proxy.Dialer
+	socks5FallbackDirect bool
+	hijack               []string
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
@@ -206,6 +219,12 @@ type groupImpl struct {
 
 	stopCh  chan struct{}
 	stopped chan struct{}
+}
+
+// callerResult holds the DNS message and the name of the caller that provided it.
+type callerResult struct {
+	Msg        *dns.Msg
+	CallerName string
 }
 
 func (g *groupImpl) Name() string     { return g.name }
@@ -232,7 +251,35 @@ func (g *groupImpl) Match(req *dns.Msg) bool {
 	return false
 }
 
-func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
+func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
+	if msg == nil {
+		return
+	}
+
+	for _, rule := range g.hijack {
+		//logrus.Warnf("group %s", g.name)
+		parts := strings.Split(rule, "/")
+		if len(parts) != 4 || parts[0] != "" || parts[3] != "" {
+			continue // Skip invalid rule
+		}
+		source := parts[1]
+		dest := parts[2]
+
+		for i := range msg.Question {
+			if reverse == false {
+				if strings.Contains(msg.Question[i].Name, source) {
+					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, source, dest, -1)
+				}
+			} else {
+				if strings.Contains(msg.Question[i].Name, dest) {
+					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, dest, source, -1)
+				}
+			}
+		}
+	}
+}
+
+func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
 	for _, question := range req.Question {
 		if g.disableQTypes[question.Qtype] {
 			return nil // disabled
@@ -249,6 +296,8 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 		}
 	}
 
+	g.processHijackRules(req, false)
+
 	if !g.concurrent && !g.fastestIP {
 		// 依次请求上游DNS
 		for _, caller := range g.callers {
@@ -257,22 +306,24 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
 				continue
 			}
-			return resp
+			g.processHijackRules(resp, true)
+			return &HandleResult{Msg: resp, CallerName: caller.String()}
 		}
 		return nil
 	}
 
 	// 并发请求上游DNS
 	chLen := len(g.callers)
-	respCh := make(chan *dns.Msg, chLen)
+	respCh := make(chan *callerResult, chLen)
 	for _, caller := range g.callers {
 		go func(caller Caller) {
 			resp, err := caller.Call(req)
 			if err == nil {
-				respCh <- resp
+				g.processHijackRules(resp, true)
+				respCh <- &callerResult{Msg: resp, CallerName: caller.String()}
 			} else {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
-				respCh <- nil
+				respCh <- nil // Send nil if error, meaning no valid *callerResult
 			}
 		}(caller)
 	}
@@ -287,31 +338,35 @@ func (g *groupImpl) Handle(req *dns.Msg) *dns.Msg {
 	}
 	// 无需测速，只需返回第一个不为nil的DNS响应
 	for i := 0; i < chLen; i++ {
-		if resp := <-respCh; resp != nil {
-			return resp
+		if cr := <-respCh; cr != nil {
+			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 		}
 	}
 	return nil
 }
 
-func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *dns.Msg {
+func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen int) *HandleResult {
 	const (
 		maxGoNum    = 15 // 最大并发量
 		pingTimeout = 500 * time.Millisecond
 	)
 	// 从resp ch中提取所有IP地址，并建立IP地址到resp的映射
 	allIP := make([]string, 0, maxGoNum)
-	respMap := make(map[string]*dns.Msg, maxGoNum)
-	var firstResp *dns.Msg // 最早抵达的msg，当测速失败时返回该响应
+	respMap := make(map[string]*callerResult, maxGoNum) // Change type
+	var firstCR *callerResult // Store the first callerResult
+	var firstResp *dns.Msg    // 最早抵达的msg，当测速失败时返回该响应
+	var firstRespCallerName string
 	for i := 0; i < chLen; i++ {
-		resp := <-respCh
-		if resp == nil {
+		cr := <-respCh // Changed resp to cr
+		if cr == nil {
 			continue
 		}
-		if firstResp == nil {
-			firstResp = resp
+		if firstCR == nil { // Store the first callerResult
+			firstCR = cr
+			firstResp = cr.Msg
+			firstRespCallerName = cr.CallerName
 		}
-		for _, answer := range resp.Answer {
+		for _, answer := range cr.Msg.Answer { // Access cr.Msg
 			var ip string
 			switch rr := answer.(type) {
 			case *dns.A:
@@ -326,7 +381,7 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *
 			if ip != "" {
 				allIP = append(allIP, ip)
 				if _, exists := respMap[ip]; !exists {
-					respMap[ip] = resp
+					respMap[ip] = cr // Store callerResult
 					if len(respMap) >= maxGoNum {
 						goto doPing
 					}
@@ -337,18 +392,27 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *dns.Msg, chLen int) *
 doPing:
 	switch len(respMap) {
 	case 0: // 没有任何IP地址
-		return firstResp
+		if firstResp == nil {
+			return nil
+		}
+		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
 	case 1: // 只有一个IPv4地址
-		for _, resp := range respMap {
-			return resp
+		for _, cr := range respMap {
+			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 		}
 	}
 	fastestIP, cost, err := utils.FastestPingIP(allIP, g.tcpPingPort, pingTimeout)
 	if err != nil {
-		return firstResp
+		if firstResp == nil {
+			return nil
+		}
+		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
 	}
 	logrus.Debugf("fastest ip of %s: %s(%dms)", allIP, fastestIP, cost)
-	msg := respMap[fastestIP]
+	chosenCR := respMap[fastestIP]         // Get the chosen callerResult
+	msg := chosenCR.Msg                   // Get Msg from callerResult
+	chosenCallerName := chosenCR.CallerName // Get CallerName
+
 	// 删除msg内除fastestIP之外的其它IP记录
 	for i := 0; i < len(msg.Answer); i++ {
 		switch rr := msg.Answer[i].(type) {
@@ -366,7 +430,7 @@ doPing:
 		msg.Answer = append(msg.Answer[:i], msg.Answer[i+1:]...)
 		i--
 	}
-	return msg
+	return &HandleResult{Msg: msg, CallerName: chosenCallerName}
 }
 
 func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {
@@ -415,7 +479,7 @@ func (g *groupImpl) grabGFWList() *matcher.ABPlus {
 		logrus.Warnf("get gfw list %q failed, status_code: %d", g.gfwListURL, resp.StatusCode)
 		return nil
 	}
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logrus.Warnf("read gfw list %q failed, error: %+v", g.gfwListURL, err)
 		return nil
