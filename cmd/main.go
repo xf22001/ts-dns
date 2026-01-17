@@ -173,7 +173,7 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 		go func() {
 			defer wg.Done()
 			logrus.Infof("listen on %s/dns-query", addr)
-			if err := dohServer.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
+			if err := dohServer.ServeTLS(tlsListener, "", ""); err != nil && err != http.ErrServerClosed {
 				logrus.Fatalf("doh service stopped: %+v", err)
 			}
 		}()
