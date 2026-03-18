@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -147,18 +148,24 @@ type handlerImpl struct {
 }
 
 func (h *handlerImpl) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
-	resp := h.handle(writer, req)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 5s total timeout
+	defer cancel()
+	resp := h.handle(ctx, writer, req)
 	if resp == nil {
 		resp = new(dns.Msg)
 	}
 	if !resp.Response {
 		resp.SetReply(req)
 	}
-	_ = writer.WriteMsg(resp)
-	_ = writer.Close()
+	if err := writer.WriteMsg(resp); err != nil {
+		logrus.Errorf("write msg failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		logrus.Errorf("close writer failed: %v", err)
+	}
 }
 
-func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns.Msg) {
+func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req *dns.Msg) (resp *dns.Msg) {
 	// region log
 	_info := struct {
 		blocked  bool
@@ -207,17 +214,27 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 			fields["answer"] = len(resp.Answer)
 			if logrus.IsLevelEnabled(logrus.DebugLevel) {
 				var resolvedIPs []string
+				var answers []map[string]interface{}
 				for _, rr := range resp.Answer {
+					ans := map[string]interface{}{
+						"name":   rr.Header().Name,
+						"type":   dns.TypeToString[rr.Header().Rrtype],
+						"ttl":    rr.Header().Ttl,
+					}
 					switch v := rr.(type) {
 					case *dns.A:
 						resolvedIPs = append(resolvedIPs, v.A.String())
+						ans["data"] = v.A.String()
 					case *dns.AAAA:
 						resolvedIPs = append(resolvedIPs, v.AAAA.String())
+						ans["data"] = v.AAAA.String()
 					}
+					answers = append(answers, ans)
 				}
 				if len(resolvedIPs) > 0 {
 					fields["resolved_ips"] = strings.Join(resolvedIPs, ", ")
 				}
+				fields["answers"] = answers
 			}
 		}
 		if _info.blocked || _info.hitCache || _info.hitHosts {
@@ -252,13 +269,13 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 	for _, group := range h.groups {
 		if group.Match(req) {
 			matched = group
-			result = group.Handle(req)
+			result = group.Handle(ctx, req)
 			break
 		}
 	}
 	if matched == nil {
 		matched = h.fallbackGroup
-		result = h.fallbackGroup.Handle(req)
+		result = h.fallbackGroup.Handle(ctx, req)
 		_info.fallback = true
 	}
 	_info.matched = matched
@@ -271,7 +288,7 @@ func (h *handlerImpl) handle(writer dns.ResponseWriter, req *dns.Msg) (resp *dns
 	if h.redirector != nil {
 		if group := h.redirector(matched, req, resp); group != nil {
 			matched = group
-			result = group.Handle(req)
+			result = group.Handle(ctx, req)
 			_info.redirect = group
 			if result != nil {
 				resp = result.Msg

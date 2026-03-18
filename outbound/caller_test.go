@@ -2,13 +2,14 @@ package outbound
 
 import (
 	"fmt"
-	"github.com/wolf-joe/ts-dns/utils/mock"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/wolf-joe/ts-dns/utils/mock"
 
 	"github.com/agiledragon/gomonkey"
 	"github.com/miekg/dns"
@@ -39,23 +40,23 @@ func MockMethodSeq(target interface{}, methodName string, outputs []gomonkey.Par
 func TestDNSCaller(t *testing.T) {
 	req := &dns.Msg{}
 
-	caller := NewDNSCaller("", "", nil)
+	caller := NewDNSCaller("", "", nil, false)
 	// 不使用代理，mock掉Exchange
 	p := MockMethodSeq(caller.client, "Exchange", []gomonkey.Params{
 		{nil, time.Second, fmt.Errorf("err")},
 		{&dns.Msg{}, time.Second, nil},
 	})
 	// exchange调用失败
-	r, err := caller.Call(req)
+	r, err := caller.Call(ctx, req)
 	assertFail(t, r, err)
 	// exchange调用成功
-	r, err = caller.Call(req)
+	r, err = caller.Call(ctx, req)
 	assertSuccess(t, r, err)
 
 	caller.Exit()
 	_ = caller.String()
 
-	caller = NewDoTCaller("", "", dialer)
+	caller = NewDoTCaller("", "", dialer, false)
 	// 使用代理，mock掉Dial、WriteMsg、ReadMsg
 	p1 := MockMethodSeq(caller.proxy, "Dial", []gomonkey.Params{
 		{nil, fmt.Errorf("err")},
@@ -69,16 +70,16 @@ func TestDNSCaller(t *testing.T) {
 	})
 	defer func() { p.Reset(); p1.Reset(); p2.Reset(); p3.Reset() }()
 	// Dial失败
-	r, err = caller.Call(req)
+	r, err = caller.Call(ctx, req)
 	assertFail(t, r, err)
 	// Dial成功，但WriteMsg失败
-	r, err = caller.Call(req)
+	r, err = caller.Call(ctx, req)
 	assertFail(t, r, err)
 	// Dial、WriteMsg成功，但ReadMsg失败
-	r, err = caller.Call(req)
+	r, err = caller.Call(ctx, req)
 	assertFail(t, r, err)
 	// Dial、WriteMsg、ReadMsg都成功
-	r, err = caller.Call(req)
+	r, err = caller.Call(ctx, req)
 	assertSuccess(t, r, err)
 
 	caller.Exit()
@@ -111,7 +112,7 @@ func TestDoHCallerV2(t *testing.T) {
 	url := "https://dns.alidns.com/dns-query"
 
 	// 测试run和stop
-	caller, err := NewDoHCallerV2(url, nil)
+	caller, err := NewDoHCallerV2(url, nil, false)
 	caller.Start(nil)
 	assert.Nil(t, err)
 	caller.Exit()
@@ -132,10 +133,10 @@ func TestDoHCallerV2(t *testing.T) {
 		time.Sleep(time.Second * 3)
 		return nil
 	})
-	caller, err = NewDoHCallerV2(url, nil)
+	caller, err = NewDoHCallerV2(url, nil, false)
 	assert.Nil(t, err)
 	caller.Start(resolver)
-	_, err = caller.Call(req)
+	_, err = caller.Call(ctx, req)
 	assert.NotNil(t, err) // timeout
 	caller.Exit()
 
@@ -144,10 +145,10 @@ func TestDoHCallerV2(t *testing.T) {
 		MsgHdr:   dns.MsgHdr{Id: 0xffff, RecursionDesired: true, AuthenticatedData: true},
 		Question: []dns.Question{{Name: "DNS.ALIDNS.COM.", Qtype: dns.TypeA, Qclass: dns.ClassINET}},
 	}
-	caller, err = NewDoHCallerV2(url, nil)
+	caller, err = NewDoHCallerV2(url, nil, false)
 	assert.Nil(t, err)
 	caller.Start(resolver)
-	_, err = caller.Call(recReq)
+	_, err = caller.Call(ctx, recReq)
 	assert.NotNil(t, err) // timeout
 	caller.Exit()
 
@@ -158,7 +159,7 @@ func TestDoHCallerV2(t *testing.T) {
 		{nil, fmt.Errorf("err")}, {[]byte{1}, nil}, {[]byte{1}, nil},
 		{[]byte{1}, nil}, {[]byte{1}, nil}, {[]byte{1}, nil},
 	})
-	mocker.FuncSeq(http.NewRequest, []gomonkey.Params{
+	mocker.FuncSeq(http.NewRequestWithContext, []gomonkey.Params{
 		{nil, fmt.Errorf("err")}, {httpReq, nil}, {httpReq, nil},
 		{httpReq, nil}, {httpReq, nil},
 	})
@@ -178,27 +179,27 @@ func TestDoHCallerV2(t *testing.T) {
 			&dns.A{A: net.IPv4(223, 5, 5, 5)},
 		}}
 	})
-	caller, err = NewDoHCallerV2(url, nil)
+	caller, err = NewDoHCallerV2(url, nil, false)
 	assert.Nil(t, err)
 	caller.Start(resolver)
 	// Pack失败
-	_, err = caller.Call(req)
+	_, err = caller.Call(ctx, req)
 	assert.NotNil(t, err)
 	// Pack成功，但NewRequest失败
-	_, err = caller.Call(req)
+	_, err = caller.Call(ctx, req)
 	assert.NotNil(t, err)
 	// Pack、NewRequest成功，但Do失败
-	_, err = caller.Call(req)
+	_, err = caller.Call(ctx, req)
 	assert.NotNil(t, err)
 	// Pack、NewRequest、Do成功，但ReadAll失败
-	_, err = caller.Call(req)
+	_, err = caller.Call(ctx, req)
 	assert.NotNil(t, err)
 	// Pack、NewRequest、Do、ReadAll成功，但Unpack失败
-	resp, err := caller.Call(req)
+	resp, err := caller.Call(ctx, req)
 	assert.NotNil(t, err)
 	assert.Nil(t, resp)
 	// Pack、NewRequest、Do、ReadAll、Unpack成功
-	//resp, err = caller.Call(req)
+	//resp, err = caller.Call(ctx, req)
 	//assert.Nil(t, err)
 	//assert.NotNil(t, resp)
 

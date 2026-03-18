@@ -2,14 +2,15 @@ package cache
 
 import (
 	"fmt"
-	"github.com/miekg/dns"
-	"github.com/valyala/fastrand"
-	"github.com/wolf-joe/ts-dns/config"
-	"github.com/wolf-joe/ts-dns/utils"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
+	"github.com/valyala/fastrand"
+	"github.com/wolf-joe/ts-dns/config"
+	"github.com/wolf-joe/ts-dns/utils"
 )
 
 const (
@@ -134,6 +135,8 @@ func (c *dnsCache) Set(req *dns.Msg, resp *dns.Msg) {
 	if length >= c.maxSize {
 		return
 	}
+	// copy resp to avoid data race
+	resp = resp.Copy()
 	// reset ttl
 	key := c.cacheKey(req)
 	var expire = c.maxTTL

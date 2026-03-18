@@ -1,12 +1,12 @@
 package redirector
 
 import (
+	"testing"
+
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/outbound"
-	"github.com/wolf-joe/ts-dns/utils/mock"
-	"testing"
 )
 
 func newResp(ip string) *dns.Msg {
@@ -38,7 +38,7 @@ func Test_newCidrRedirector(t *testing.T) {
 			RulesFile: "testdata/not_exists.txt",
 			DstGroup:  "group1",
 		}
-		groups := map[string]outbound.IGroup{"group1": mock.Group{}}
+		groups := map[string]outbound.IGroup{"group1": mockGroup{}}
 		_, err := newCidrRedirector("redir1", conf, groups)
 		assert.NotNil(t, err)
 		t.Log(err)
@@ -55,7 +55,7 @@ func Test_newCidrRedirector(t *testing.T) {
 			RulesFile: "testdata/normal_cidr.txt",
 			DstGroup:  "group1",
 		}
-		groups := map[string]outbound.IGroup{"group1": mock.Group{}}
+		groups := map[string]outbound.IGroup{"group1": mockGroup{}}
 		redir, err := newCidrRedirector("redir1", conf, groups)
 		t.Logf("%s", redir)
 		assert.Nil(t, err)
@@ -71,7 +71,7 @@ func Test_newCidrRedirector(t *testing.T) {
 			RulesFile: "testdata/normal_cidr.txt",
 			DstGroup:  "group1",
 		}
-		groups := map[string]outbound.IGroup{"group1": mock.Group{}}
+		groups := map[string]outbound.IGroup{"group1": mockGroup{}}
 		redir, err := newCidrRedirector("redir1", conf, groups)
 		assert.Nil(t, err)
 
@@ -88,7 +88,7 @@ func TestNewRedirector(t *testing.T) {
 				"redir1": {Type: ""},
 			},
 		}
-		group1 := mock.Group{}
+		group1 := mockGroup{}
 		groups := map[string]outbound.IGroup{"group1": group1}
 		_, err := NewRedirector(conf, groups)
 		assert.NotNil(t, err)
@@ -103,7 +103,7 @@ func TestNewRedirector(t *testing.T) {
 				"redir2": {Type: TypeMatchCidr, Rules: []string{"1.1.1.0/24"}, DstGroup: "g1"},
 			},
 		}
-		groups := map[string]outbound.IGroup{"g1": mock.Group{}}
+		groups := map[string]outbound.IGroup{"g1": mockGroup{}}
 		_, err := NewRedirector(conf, groups)
 		assert.NotNil(t, err)
 		t.Logf("%s", err)
@@ -117,7 +117,7 @@ func TestNewRedirector(t *testing.T) {
 				"redir1": {Type: TypeMatchCidr, Rules: []string{"1.1.1.0/24"}, DstGroup: "g1"},
 			},
 		}
-		g1 := mock.Group{
+		g1 := mockGroup{
 			MockName:   func() string { return "g1" },
 			MockString: func() string { return "group_g1" },
 		}
@@ -136,11 +136,11 @@ func TestNewRedirector(t *testing.T) {
 				"redir1": {Type: TypeMatchCidr, Rules: []string{"1.1.1.0/24"}, DstGroup: "g2"},
 			},
 		}
-		g1 := mock.Group{
+		g1 := mockGroup{
 			MockName:   func() string { return "g1" },
 			MockString: func() string { return "group_g1" },
 		}
-		g2 := mock.Group{
+		g2 := mockGroup{
 			MockName:   func() string { return "g2" },
 			MockString: func() string { return "group_g2" },
 		}
@@ -161,11 +161,11 @@ func TestNewRedirector(t *testing.T) {
 				"redir1": {Type: TypeMatchCidr, Rules: []string{"1.1.1.0/24"}, DstGroup: "g1"},
 			},
 		}
-		g1 := mock.Group{
+		g1 := mockGroup{
 			MockName:   func() string { return "g1" },
 			MockString: func() string { return "group_g1" },
 		}
-		g2 := mock.Group{
+		g2 := mockGroup{
 			MockName:   func() string { return "g2" },
 			MockString: func() string { return "group_g2" },
 		}
