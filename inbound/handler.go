@@ -134,6 +134,10 @@ func newHandle(conf config.Conf) (*handlerImpl, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build redirector failed: %w", err)
 	}
+	h.queryTimeout = time.Duration(conf.QueryTimeout) * time.Second
+	if h.queryTimeout <= 0 {
+		h.queryTimeout = 5 * time.Second
+	}
 	return h, nil
 }
 
@@ -145,10 +149,11 @@ type handlerImpl struct {
 	groups        map[string]outbound.IGroup
 	fallbackGroup outbound.IGroup
 	redirector    redirector.Redirector
+	queryTimeout  time.Duration
 }
 
 func (h *handlerImpl) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 5s total timeout
+	ctx, cancel := context.WithTimeout(context.Background(), h.queryTimeout)
 	defer cancel()
 	resp := h.handle(ctx, writer, req)
 	if resp == nil {
