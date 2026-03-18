@@ -31,7 +31,7 @@ type HandleResult struct {
 type IGroup interface {
 	Match(req *dns.Msg) bool
 	IsFallback() bool
-	Handle(req *dns.Msg) *HandleResult
+	Handle(ctx context.Context, req *dns.Msg) *HandleResult
 	PostProcess(req *dns.Msg, resp *dns.Msg)
 	Start(resolver dns.Handler)
 	Stop()
@@ -279,7 +279,7 @@ func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
 	}
 }
 
-func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
+func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	for _, question := range req.Question {
 		if g.disableQTypes[question.Qtype] {
 			return nil // disabled
@@ -301,7 +301,7 @@ func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
 	if !g.concurrent && !g.fastestIP {
 		// 依次请求上游DNS
 		for _, caller := range g.callers {
-			resp, err := caller.Call(req)
+			resp, err := caller.Call(ctx, req)
 			if err != nil {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
 				continue
@@ -317,7 +317,7 @@ func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
 	respCh := make(chan *callerResult, chLen)
 	for _, caller := range g.callers {
 		go func(caller Caller) {
-			resp, err := caller.Call(req)
+			resp, err := caller.Call(ctx, req)
 			if err == nil {
 				g.processHijackRules(resp, true)
 				respCh <- &callerResult{Msg: resp, CallerName: caller.String()}
@@ -338,8 +338,13 @@ func (g *groupImpl) Handle(req *dns.Msg) *HandleResult {
 	}
 	// 无需测速，只需返回第一个不为nil的DNS响应
 	for i := 0; i < chLen; i++ {
-		if cr := <-respCh; cr != nil {
-			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
+		select {
+		case cr := <-respCh:
+			if cr != nil {
+				return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
+			}
+		case <-ctx.Done():
+			return nil
 		}
 	}
 	return nil
@@ -353,8 +358,8 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen i
 	// 从resp ch中提取所有IP地址，并建立IP地址到resp的映射
 	allIP := make([]string, 0, maxGoNum)
 	respMap := make(map[string]*callerResult, maxGoNum) // Change type
-	var firstCR *callerResult // Store the first callerResult
-	var firstResp *dns.Msg    // 最早抵达的msg，当测速失败时返回该响应
+	var firstCR *callerResult                           // Store the first callerResult
+	var firstResp *dns.Msg                              // 最早抵达的msg，当测速失败时返回该响应
 	var firstRespCallerName string
 	for i := 0; i < chLen; i++ {
 		cr := <-respCh // Changed resp to cr
@@ -409,8 +414,8 @@ doPing:
 		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
 	}
 	logrus.Debugf("fastest ip of %s: %s(%dms)", allIP, fastestIP, cost)
-	chosenCR := respMap[fastestIP]         // Get the chosen callerResult
-	msg := chosenCR.Msg                   // Get Msg from callerResult
+	chosenCR := respMap[fastestIP]          // Get the chosen callerResult
+	msg := chosenCR.Msg                     // Get Msg from callerResult
 	chosenCallerName := chosenCR.CallerName // Get CallerName
 
 	// 删除msg内除fastestIP之外的其它IP记录

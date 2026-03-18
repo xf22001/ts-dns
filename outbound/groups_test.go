@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -56,7 +57,7 @@ func TestDisableIPv6(t *testing.T) {
 	assert.Nil(t, err)
 	g := groups["g1"]
 	assert.NotNil(t, g)
-	resp := g.Handle(&dns.Msg{
+	resp := g.Handle(context.Background(), &dns.Msg{
 		Question: []dns.Question{{
 			Name:   "z.cn.",
 			Qtype:  dns.TypeAAAA,

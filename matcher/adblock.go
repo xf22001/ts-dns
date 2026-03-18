@@ -10,9 +10,33 @@ import (
 
 // ABPlus 基于部分AdBlock Plus规则的域名匹配器
 type ABPlus struct {
-	isBlocked     map[string]bool
-	blockedRegs   []*regexp.Regexp
-	unblockedRegs []*regexp.Regexp
+	isBlocked            map[string]bool
+	blockedRegs          []*regexp.Regexp
+	unblockedRegs        []*regexp.Regexp
+	combinedBlockedReg   *regexp.Regexp
+	combinedUnblockedReg *regexp.Regexp
+}
+
+// Optimize 预编译合并正则表达式，提升匹配性能
+func (matcher *ABPlus) Optimize() {
+	matcher.combinedBlockedReg = matcher.mergeRegs(matcher.blockedRegs)
+	matcher.combinedUnblockedReg = matcher.mergeRegs(matcher.unblockedRegs)
+}
+
+func (matcher *ABPlus) mergeRegs(regs []*regexp.Regexp) *regexp.Regexp {
+	if len(regs) == 0 {
+		return nil
+	}
+	patterns := make([]string, 0, len(regs))
+	for _, reg := range regs {
+		patterns = append(patterns, "(?:"+reg.String()+")")
+	}
+	combined, err := regexp.Compile(strings.Join(patterns, "|"))
+	if err != nil {
+		// 如果合并编译失败（极少见），退回到 nil
+		return nil
+	}
+	return combined
 }
 
 // Match 判断域名是否匹配ADBlock Plus规则
@@ -35,15 +59,29 @@ func (matcher *ABPlus) Match(domain string) (matched bool, ok bool) {
 			suffix = suffix[strings.Index(suffix, "."):] // 移除最低级的域名再匹配
 		}
 	}
-	// 通配符匹配
-	for _, regex := range matcher.blockedRegs {
-		if regex.MatchString(domain) {
+	// 优先使用合并正则进行快速匹配
+	if matcher.combinedBlockedReg != nil {
+		if matcher.combinedBlockedReg.MatchString(domain) {
 			return true, true
 		}
+	} else if len(matcher.blockedRegs) > 0 {
+		// 降级到线性匹配
+		for _, regex := range matcher.blockedRegs {
+			if regex.MatchString(domain) {
+				return true, true
+			}
+		}
 	}
-	for _, regex := range matcher.unblockedRegs {
-		if regex.MatchString(domain) {
+
+	if matcher.combinedUnblockedReg != nil {
+		if matcher.combinedUnblockedReg.MatchString(domain) {
 			return false, true
+		}
+	} else if len(matcher.unblockedRegs) > 0 {
+		for _, regex := range matcher.unblockedRegs {
+			if regex.MatchString(domain) {
+				return false, true
+			}
 		}
 	}
 	// 匹配失败
@@ -58,6 +96,7 @@ func (matcher *ABPlus) Extend(target *ABPlus) {
 		}
 		matcher.blockedRegs = append(matcher.blockedRegs, target.blockedRegs...)
 		matcher.unblockedRegs = append(matcher.unblockedRegs, target.unblockedRegs...)
+		matcher.Optimize() // 扩展后重新优化
 	}
 }
 
@@ -125,6 +164,7 @@ func NewABPByText(text string) (matcher *ABPlus) {
 		domain = strings.ToLower(domain)
 		matcher.isBlocked[domain] = line[:2] != "@@"
 	}
+	matcher.Optimize()
 	return matcher
 }
 

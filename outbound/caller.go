@@ -24,7 +24,7 @@ import (
 
 // Caller 上游DNS请求基类
 type Caller interface {
-	Call(request *dns.Msg) (r *dns.Msg, err error)
+	Call(ctx context.Context, request *dns.Msg) (r *dns.Msg, err error)
 	Start(resolver dns.Handler)
 	Exit()
 	String() string
@@ -41,44 +41,49 @@ type DNSCaller struct {
 	server               string
 	proxy                proxy.Dialer
 	socks5FallbackDirect bool
-	conn                 *dns.Conn
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
 
 // Call 向目标上游DNS转发请求
-func (caller *DNSCaller) Call(request *dns.Msg) (r *dns.Msg, err error) {
+func (caller *DNSCaller) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg, err error) {
 	if caller.proxy == nil { // 不使用代理，直接发送dns请求
+		// Note: dns.Client.Exchange doesn't support context directly in this version,
+		// but we can use ExchangeContext if available or wrap it.
+		// For now, we prioritize thread safety and basic proxy context support.
 		r, _, err = caller.client.Exchange(request, caller.server)
 		return
 	}
 	// 通过代理连接代理服务器
 	var proxyConn net.Conn
-	proxyConn, err = caller.proxy.Dial("tcp", caller.server)
+	if contextDialer, ok := caller.proxy.(proxy.ContextDialer); ok {
+		proxyConn, err = contextDialer.DialContext(ctx, "tcp", caller.server)
+	} else {
+		proxyConn, err = caller.proxy.Dial("tcp", caller.server)
+	}
+
 	if err != nil {
 		if caller.socks5FallbackDirect {
-			// logrus.Warnf("DNSCaller %s proxy dial failed: %v, attempting direct connection", caller.server, err)
-			// Attempt direct connection
-			client := &dns.Client{Net: caller.client.Net} // Create a new client without proxy
+			client := &dns.Client{Net: caller.client.Net}
 			r, _, directErr := client.Exchange(request, caller.server)
 			if directErr == nil {
 				return r, nil
 			}
-			// logrus.Warnf("DNSCaller %s direct connection also failed: %v", caller.server, directErr)
 		}
-		return nil, err // Original proxy error or direct connection failed
-	}
-	defer func() { _ = proxyConn.Close() }()
-	// 打包连接
-	caller.conn.Conn = proxyConn
-	if caller.client.TLSConfig != nil { // dns over tls
-		caller.conn.Conn = tls.Client(proxyConn, caller.client.TLSConfig)
-	}
-	// 发送dns请求
-	if err = caller.conn.WriteMsg(request); err != nil {
 		return nil, err
 	}
-	return caller.conn.ReadMsg()
+	defer func() { _ = proxyConn.Close() }()
+
+	// 使用局部变量 conn 确保线程安全
+	conn := &dns.Conn{Conn: proxyConn}
+	if caller.client.TLSConfig != nil { // dns over tls
+		conn.Conn = tls.Client(proxyConn, caller.client.TLSConfig)
+	}
+	// 发送dns请求
+	if err = conn.WriteMsg(request); err != nil {
+		return nil, err
+	}
+	return conn.ReadMsg()
 }
 
 // Exit caller退出时行为
@@ -89,16 +94,16 @@ func (caller *DNSCaller) String() string {
 	return fmt.Sprintf("DNSCaller<%s/%s>", caller.server, caller.client.Net)
 }
 
-// NewDNSCaller 创建一个UDP/TCP Caller，需要服务器地址（ip+端口）、网络类型（udp、tcp），可选代理
+// NewDNSCaller 创建一个UDP/TCP Caller
 func NewDNSCaller(server, network string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
 	client := &dns.Client{Net: network}
-	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect, conn: &dns.Conn{}}
+	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
 }
 
-// NewDoTCaller 创建一个DoT Caller，需要服务器地址（ip+端口）、证书名称，可选代理
+// NewDoTCaller 创建一个DoT Caller
 func NewDoTCaller(server, serverName string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
 	client := &dns.Client{Net: "tcp-tls", TLSConfig: &tls.Config{ServerName: serverName}}
-	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect, conn: &dns.Conn{}}
+	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
 }
 
 // DoHCallerV2 DoT请求类，通过resolver自动解析域名
@@ -219,7 +224,7 @@ CHOICE:
 }
 
 // Call 向上游DNS转发请求
-func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
+func (caller *DoHCallerV2) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg, err error) {
 	// --- Original logic using proxy ---
 	client := caller.getClient(request)
 	if client == nil {
@@ -231,7 +236,7 @@ func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
 	}
 	var req *http.Request
 	contentType, payload := "application/dns-message", bytes.NewBuffer(buf)
-	if req, err = http.NewRequest("POST", caller.url, payload); err != nil {
+	if req, err = http.NewRequestWithContext(ctx, "POST", caller.url, payload); err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
@@ -241,19 +246,19 @@ func (caller *DoHCallerV2) Call(request *dns.Msg) (r *dns.Msg, err error) {
 
 	if err != nil {
 		if caller.socks5FallbackDirect {
-			// logrus.Warnf("DoHCallerV2 %s proxy call failed: %v, attempting direct connection", caller.url, err)
 			// --- Fallback to direct connection ---
 			directClient := &http.Client{Transport: &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return caller.directDialer.DialContext(ctx, network, addr)
 				},
 			}}
-			directResp, directErr := directClient.Do(req)
+			directReq, _ := http.NewRequestWithContext(ctx, "POST", caller.url, bytes.NewBuffer(buf))
+			directReq.Header.Set("Content-Type", contentType)
+			directResp, directErr := directClient.Do(directReq)
 			if directErr == nil {
 				resp = directResp // Use the successful direct response
 				err = nil         // Clear the error
 			} else {
-				// logrus.Warnf("DoHCallerV2 %s direct connection also failed: %v", caller.url, directErr)
 				return nil, err // Both failed, return original proxy error
 			}
 		} else {
