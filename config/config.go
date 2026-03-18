@@ -10,8 +10,9 @@ type Conf struct {
 	DisableQTypes []string                  `toml:"disable_qtypes"`
 	Redirectors   map[string]RedirectorConf `toml:"redirectors"`
 
-	Listen      string `toml:"listen"`
-	SSLCertFile string `toml:"ssl_cert_file"`
+	Listen       string `toml:"listen"`
+	QueryTimeout int    `toml:"query_timeout"` // 全局查询超时（秒）
+	SSLCertFile  string `toml:"ssl_cert_file"`
 	SSLKeyFile  string `toml:"ssl_key_file"`
 }
 
