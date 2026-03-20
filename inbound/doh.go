@@ -2,8 +2,10 @@ package inbound
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/miekg/dns"
 	"github.com/wolf-joe/ts-dns/utils"
@@ -33,6 +35,9 @@ func (h *DohHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		b64Query := r.URL.Query().Get("dns")
+		// Remove padding as RFC 8484 recommends base64url without padding, 
+		// but some clients might include it.
+		b64Query = strings.TrimRight(b64Query, "=")
 		query, err = base64.RawURLEncoding.DecodeString(b64Query)
 		if err != nil {
 			http.Error(w, "invalid dns query", http.StatusBadRequest)
@@ -75,6 +80,9 @@ func (h *DohHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/dns-message")
+	if minTTL := utils.GetMinTTL(writer.Msg); minTTL > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", minTTL))
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }

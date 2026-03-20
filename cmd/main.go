@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -14,7 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/miekg/dns"
@@ -137,9 +140,19 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			srv := &dns.Server{Addr: addr, Net: "udp", Handler: handler}
+			// Tune UDP buffer size
+			lc := net.ListenConfig{}
+			pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+			if err != nil {
+				logrus.Fatalf("listen on %s/udp failed: %v", addr, err)
+			}
+			if udpConn, ok := pc.(*net.UDPConn); ok {
+				_ = udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+				_ = udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
+			}
+			srv := &dns.Server{PacketConn: pc, Handler: handler}
 			logrus.Infof("listen on %s/udp", addr)
-			if err := srv.ListenAndServe(); err != nil {
+			if err := srv.ActivateAndServe(); err != nil {
 				logrus.Fatalf("udp service stopped: %+v", err)
 			}
 		}()
@@ -154,21 +167,46 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 		defer l.Close()
 
 		m := cmux.New(l)
+		m.SetReadTimeout(time.Second * 5) // Prevent Slowloris attacks on cmux level
 		tlsListener := m.Match(cmux.TLS())
 		anyListener := m.Match(cmux.Any())
 
 		// start doh server
 		dohHandler := inbound.NewDohHandler(handler)
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
+		var certPtr atomic.Value
+		loadCert := func() (*tls.Certificate, error) {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				return nil, err
+			}
+			certPtr.Store(&cert)
+			return &cert, nil
+		}
+		if _, err := loadCert(); err != nil {
 			logrus.Fatalf("load cert failed: %v", err)
 		}
 		dohServer := &http.Server{
 			Handler: dohHandler,
 			TLSConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
+				GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return certPtr.Load().(*tls.Certificate), nil
+				},
+				NextProtos: []string{"h2", "http/1.1"}, // Enable HTTP/2
 			},
+			ReadTimeout:  time.Second * 5,
+			WriteTimeout: time.Second * 5,
+			IdleTimeout:  time.Second * 30,
 		}
+
+		// Watch for certificate changes if ReloadConfig is called
+		go func() {
+			for {
+				time.Sleep(time.Minute * 10) // Optional: period check
+				if _, err := loadCert(); err != nil {
+					logrus.Errorf("reload cert failed: %v", err)
+				}
+			}
+		}()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

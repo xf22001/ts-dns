@@ -122,3 +122,30 @@ func RemoveA(resp *dns.Msg) {
 		}
 	}
 }
+
+// GetMinTTL returns the minimum TTL from a DNS message's Answer, NS, and Extra sections.
+func GetMinTTL(msg *dns.Msg) uint32 {
+	if msg == nil {
+		return 0
+	}
+	var minTTL uint32 = 0
+	first := true
+	updateMin := func(ttl uint32) {
+		if first || ttl < minTTL {
+			minTTL = ttl
+			first = false
+		}
+	}
+	for _, rr := range msg.Answer {
+		updateMin(rr.Header().Ttl)
+	}
+	for _, rr := range msg.Ns {
+		updateMin(rr.Header().Ttl)
+	}
+	for _, rr := range msg.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			updateMin(rr.Header().Ttl)
+		}
+	}
+	return minTTL
+}
