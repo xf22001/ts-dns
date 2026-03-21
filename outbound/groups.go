@@ -183,6 +183,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			}
 			g.ipSet6 = ipSetWrapper{is}
 		}
+		g.ipSetCh = make(chan ipSetTask, 1024)
 		groups[name] = g
 	}
 
@@ -192,6 +193,12 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 var (
 	_ IGroup = &groupImpl{}
 )
+
+type ipSetTask struct {
+	val     string
+	timeout int
+	target  iIPSet
+}
 
 type groupImpl struct {
 	name     string
@@ -216,6 +223,7 @@ type groupImpl struct {
 
 	ipSet  iIPSet // 将响应中的IPv4地址加入ipset
 	ipSet6 iIPSet // 将响应中的IPv4地址加入ipset
+	ipSetCh chan ipSetTask
 
 	stopCh  chan struct{}
 	stopped chan struct{}
@@ -454,8 +462,10 @@ func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {
 		if val == "" || target == nil {
 			continue
 		}
-		if err := target.Add(val, target.GetTimeout()); err != nil {
-			logrus.Warnf("add %s to ipset<%s> failed: %+v", val, target.GetName(), err)
+		select {
+		case g.ipSetCh <- ipSetTask{val: val, timeout: target.GetTimeout(), target: target}:
+		default:
+			logrus.Warnf("ipset channel full, skip adding %s", val)
 		}
 	}
 }
@@ -501,6 +511,19 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 	for _, caller := range g.callers {
 		caller.Start(resolver)
 	}
+	// ipset worker
+	go func() {
+		for {
+			select {
+			case task := <-g.ipSetCh:
+				if err := task.target.Add(task.val, task.timeout); err != nil {
+					logrus.Warnf("add %s to ipset<%s> failed: %+v", task.val, task.target.GetName(), err)
+				}
+			case <-g.stopCh:
+				return
+			}
+		}
+	}()
 	lastSuccess := time.Unix(0, 0)
 	tick := time.NewTicker(time.Minute)
 	go func() {

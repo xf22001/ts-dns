@@ -77,8 +77,8 @@ jobs:
               echo \"--- End of Environment Variables --- \"
 
               # --- Debugging: Print the go build command ---
-              BUILD_COMMAND=\"go build -v -o \$DEST -trimpath -ldflags '-w -s'\"
-              echo \"--- Go Build Command: --- \"
+              BUILD_COMMAND="go build -v -o \$DEST/ts-dns -trimpath -ldflags '-w -s'"
+              echo "--- Go Build Command: --- "
               echo \"\$BUILD_COMMAND\"
               echo \"--- End of Go Build Command --- \"
 

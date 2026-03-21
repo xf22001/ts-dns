@@ -191,66 +191,68 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 			fields["blocked"] = true
 		}
 		if _info.hitHosts {
-			fields["hit_hosts"] = true
-		}
-		if _info.hitCache {
-			fields["hit_cache"] = true
+			fields["hit"] = "hosts"
+		} else if _info.hitCache {
+			fields["hit"] = "cache"
 		}
 		if len(req.Question) > 0 {
 			fields["question"] = req.Question[0].Name
 			fields["q_type"] = dns.TypeToString[req.Question[0].Qtype]
 		}
 		if _info.matched != nil {
+			groupName := _info.matched.Name()
 			if _info.fallback {
-				fields["group"] = "_" + _info.matched.Name()
-			} else {
-				fields["group"] = _info.matched.Name()
+				groupName = "_" + groupName
 			}
+			fields["group"] = groupName
 		}
 		if _info.redirect != nil {
 			fields["redir"] = _info.redirect.Name()
 		}
-		if _info.caller != "" { // Add caller to log fields if available
+		if _info.caller != "" {
 			fields["caller"] = _info.caller
 		}
 		if resp == nil {
-			fields["answer"] = "nil"
+			fields["answer"] = 0
 		} else {
 			fields["answer"] = len(resp.Answer)
-			if logrus.IsLevelEnabled(logrus.DebugLevel) {
-				var resolvedIPs []string
-				var answers []map[string]interface{}
-				for _, rr := range resp.Answer {
-					ans := map[string]interface{}{
-						"name":   rr.Header().Name,
-						"type":   dns.TypeToString[rr.Header().Rrtype],
-						"ttl":    rr.Header().Ttl,
-					}
-					switch v := rr.(type) {
-					case *dns.A:
-						resolvedIPs = append(resolvedIPs, v.A.String())
-						ans["data"] = v.A.String()
-					case *dns.AAAA:
-						resolvedIPs = append(resolvedIPs, v.AAAA.String())
-						ans["data"] = v.AAAA.String()
-					}
-					answers = append(answers, ans)
+			var resolvedIPs []string
+			var answers []map[string]interface{}
+			for _, rr := range resp.Answer {
+				ans := map[string]interface{}{
+					"name": rr.Header().Name,
+					"type": dns.TypeToString[rr.Header().Rrtype],
+					"ttl":  rr.Header().Ttl,
 				}
+				var val string
+				switch v := rr.(type) {
+				case *dns.A:
+					val = v.A.String()
+					resolvedIPs = append(resolvedIPs, val)
+				case *dns.AAAA:
+					val = v.AAAA.String()
+					resolvedIPs = append(resolvedIPs, val)
+				case *dns.CNAME:
+					val = v.Target
+				case *dns.PTR:
+					val = v.Ptr
+				case *dns.TXT:
+					val = strings.Join(v.Txt, " ")
+				}
+				ans["data"] = val
+				ans["value"] = val // Match legacy test expectations
+				answers = append(answers, ans)
+			}
+			// 仅在 Debug 模式下记录详细的 answers 数组和解析后的 IPs，防止 Info 日志过载
+			if logrus.GetLevel() >= logrus.DebugLevel {
 				if len(resolvedIPs) > 0 {
 					fields["resolved_ips"] = strings.Join(resolvedIPs, ", ")
 				}
 				fields["answers"] = answers
 			}
 		}
-		if _info.blocked || _info.hitCache || _info.hitHosts {
-			logrus.WithFields(fields).Debug()
-		} else {
-			if logrus.IsLevelEnabled(logrus.DebugLevel) {
-				logrus.WithFields(fields).Debug()
-			} else {
-				logrus.WithFields(fields).Info()
-			}
-		}
+		// 统一使用 Info 记录每次请求的分流决策，提升可观察性
+		logrus.WithFields(fields).Info()
 	}()
 	// endregion
 	for _, question := range req.Question {

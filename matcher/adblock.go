@@ -10,7 +10,7 @@ import (
 
 // ABPlus 基于部分AdBlock Plus规则的域名匹配器
 type ABPlus struct {
-	isBlocked            map[string]bool
+	trie                 *domainTrie
 	blockedRegs          []*regexp.Regexp
 	unblockedRegs        []*regexp.Regexp
 	combinedBlockedReg   *regexp.Regexp
@@ -48,18 +48,13 @@ func (matcher *ABPlus) Match(domain string) (matched bool, ok bool) {
 	if domain[len(domain)-1] == '.' {
 		domain = domain[:len(domain)-1] // 移除域名末尾的根域名
 	}
-	// 依次拆解域名进行匹配
-	for suffix := domain; strings.Contains(suffix, "."); {
-		if matched, ok = matcher.isBlocked[suffix]; ok {
-			return // 对应记录则返回结果
-		}
-		if suffix[0] == '.' {
-			suffix = suffix[1:] // 移除域名前的点号再匹配
-		} else {
-			suffix = suffix[strings.Index(suffix, "."):] // 移除最低级的域名再匹配
-		}
+
+	// 1. Trie 匹配（前缀树/后缀树）
+	if _, isBlock, okInTrie := matcher.trie.Match(domain); okInTrie {
+		return isBlock, true
 	}
-	// 优先使用合并正则进行快速匹配
+
+	// 2. 优先使用合并正则进行快速匹配
 	if matcher.combinedBlockedReg != nil {
 		if matcher.combinedBlockedReg.MatchString(domain) {
 			return true, true
@@ -91,9 +86,10 @@ func (matcher *ABPlus) Match(domain string) (matched bool, ok bool) {
 // Extend 将目标ABPlus对象规则添加到自身，规则重复时覆盖
 func (matcher *ABPlus) Extend(target *ABPlus) {
 	if target != nil {
-		for domain, flag := range target.isBlocked {
-			matcher.isBlocked[domain] = flag
-		}
+		// 合并 Trie
+		target.trie.Walk(func(domain string, isBlock bool) {
+			matcher.trie.Add(domain, isBlock)
+		})
 		matcher.blockedRegs = append(matcher.blockedRegs, target.blockedRegs...)
 		matcher.unblockedRegs = append(matcher.unblockedRegs, target.unblockedRegs...)
 		matcher.Optimize() // 扩展后重新优化
@@ -121,7 +117,7 @@ func NewABPByText(text string) (matcher *ABPlus) {
 		}
 		return rule
 	}
-	matcher = &ABPlus{isBlocked: map[string]bool{}}
+	matcher = &ABPlus{trie: newDomainTrie()}
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '!' || line[0] == '[' {
@@ -136,6 +132,7 @@ func NewABPByText(text string) (matcher *ABPlus) {
 		line = strings.Replace(line, "%2F", "/", -1)
 
 		domain := extractDomain(line) // 提取规则中的域名
+		domain = strings.TrimSuffix(domain, ".")
 		// 判断域名中是否有通配符
 		if strings.Contains(domain, "*") {
 			// 通配符表达式转正则表达式
@@ -162,7 +159,7 @@ func NewABPByText(text string) (matcher *ABPlus) {
 			continue // 无效域名
 		}
 		domain = strings.ToLower(domain)
-		matcher.isBlocked[domain] = line[:2] != "@@"
+		matcher.trie.Add(domain, line[:2] != "@@")
 	}
 	matcher.Optimize()
 	return matcher

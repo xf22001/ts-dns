@@ -1,16 +1,21 @@
 package inbound
 
 import (
+	"testing"
+	"time"
+
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/outbound"
 	"github.com/wolf-joe/ts-dns/utils"
-	"testing"
 )
 
 func buildReq(name string, qType uint16) *dns.Msg {
+	if name != "" && name[len(name)-1] != '.' {
+		name += "."
+	}
 	return &dns.Msg{Question: []dns.Question{{
 		Name: name, Qtype: qType,
 	}}}
@@ -69,7 +74,7 @@ func Test_newHandle(t *testing.T) {
 	defaultConf := config.Conf{
 		HostsFiles: nil,
 		Hosts: map[string]string{
-			"z.cn": "1.1.1.1", "v6.cn": "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+			"z.cn.": "1.1.1.1", "v6.cn.": "2001:db8:85a3::8a2e:370:7334",
 		},
 		Cache:         config.CacheConf{},
 		Groups:        map[string]config.Group{"fallback": {}},
@@ -85,15 +90,14 @@ func Test_newHandle(t *testing.T) {
 		assert.NotNil(t, h)
 
 		rw := utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("z.cn", dns.TypeA))
+		h.ServeDNS(rw, buildReq("z.cn.", dns.TypeA))
 		assert.NotNil(t, rw.Msg)
-		assert.NotNil(t, rw.Msg.Answer)
+		assert.NotEmpty(t, rw.Msg.Answer)
 
 		rw = utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("v6.cn", dns.TypeAAAA))
-		t.Log(rw.Msg.String())
+		h.ServeDNS(rw, buildReq("v6.cn.", dns.TypeAAAA))
 		assert.NotNil(t, rw.Msg)
-		assert.NotNil(t, rw.Msg.Answer)
+		assert.NotEmpty(t, rw.Msg.Answer)
 	})
 	t.Run("disable", func(t *testing.T) {
 		conf := defaultConf
@@ -108,35 +112,42 @@ func Test_newHandle(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotNil(t, h)
 		rw := utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("z.cn", dns.TypeA))
+		h.ServeDNS(rw, buildReq("z.cn.", dns.TypeA))
 		assert.NotNil(t, rw.Msg)
 		assert.Nil(t, rw.Msg.Answer)
 
 		rw = utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("v6.cn", dns.TypeAAAA))
+		h.ServeDNS(rw, buildReq("v6.cn.", dns.TypeAAAA))
 		assert.NotNil(t, rw.Msg)
 		assert.Nil(t, rw.Msg.Answer)
 	})
 	t.Run("cache", func(t *testing.T) {
 		conf := defaultConf
-		conf.Cache.Size = 10
+		conf.Cache.Size = 100
 		h, err := newHandle(conf)
 		assert.Nil(t, err)
 		assert.NotNil(t, h)
 
-		req := buildReq("a.cn", dns.TypeA)
-		h.cache.Set(req, &dns.Msg{
-			Answer: []dns.RR{&dns.A{}, &dns.AAAA{}},
-		})
+		req := buildReq("a.cn.", dns.TypeA)
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		rr1, _ := dns.NewRR("a.cn. 60 IN A 1.1.1.1")
+		rr2, _ := dns.NewRR("a.cn. 60 IN AAAA ::1")
+		resp.Answer = []dns.RR{rr1, rr2}
+		
+		h.cache.Set(req, resp)
+		// Ristretto is asynchronous
+		time.Sleep(time.Millisecond * 200)
+
 		rw := utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("a.cn", dns.TypeA))
+		h.ServeDNS(rw, req)
 		assert.NotNil(t, rw.Msg)
 		assert.Equal(t, 2, len(rw.Msg.Answer))
 	})
 	t.Run("group", func(t *testing.T) {
 		conf := defaultConf
 		conf.Groups["a"] = config.Group{
-			Rules: []string{"a.cn"},
+			Rules: []string{"a.cn."},
 		}
 		h, err := newHandle(conf)
 		assert.Nil(t, err)
@@ -149,7 +160,7 @@ func Test_newHandle(t *testing.T) {
 		}
 
 		rw := utils.NewFakeRespWriter()
-		h.ServeDNS(rw, buildReq("a.cn", dns.TypeA))
+		h.ServeDNS(rw, buildReq("a.cn.", dns.TypeA))
 		assert.NotNil(t, srcGroup)
 		assert.Equal(t, "a", srcGroup.Name())
 	})

@@ -41,49 +41,87 @@ type DNSCaller struct {
 	server               string
 	proxy                proxy.Dialer
 	socks5FallbackDirect bool
+	pool                 *sync.Pool
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
 
+func (caller *DNSCaller) getConn() (*dns.Conn, error) {
+	if caller.pool != nil {
+		if v := caller.pool.Get(); v != nil {
+			return v.(*dns.Conn), nil
+		}
+	}
+	var netConn net.Conn
+	var err error
+	if caller.proxy == nil {
+		netConn, err = net.DialTimeout(strings.Split(caller.client.Net, "-")[0], caller.server, caller.client.Timeout)
+	} else {
+		if contextDialer, ok := caller.proxy.(proxy.ContextDialer); ok {
+			netConn, err = contextDialer.DialContext(context.Background(), "tcp", caller.server)
+		} else {
+			netConn, err = caller.proxy.Dial("tcp", caller.server)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	dnsConn := &dns.Conn{Conn: netConn}
+	if caller.client.TLSConfig != nil {
+		dnsConn.Conn = tls.Client(netConn, caller.client.TLSConfig)
+	}
+	return dnsConn, nil
+}
+
+func (caller *DNSCaller) putConn(conn *dns.Conn) {
+	if caller.pool != nil {
+		caller.pool.Put(conn)
+	} else {
+		_ = conn.Close()
+	}
+}
+
 // Call 向目标上游DNS转发请求
 func (caller *DNSCaller) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg, err error) {
-	if caller.proxy == nil { // 不使用代理，直接发送dns请求
-		// Note: dns.Client.Exchange doesn't support context directly in this version,
-		// but we can use ExchangeContext if available or wrap it.
-		// For now, we prioritize thread safety and basic proxy context support.
-		r, _, err = caller.client.Exchange(request, caller.server)
-		return
-	}
-	// 通过代理连接代理服务器
-	var proxyConn net.Conn
-	if contextDialer, ok := caller.proxy.(proxy.ContextDialer); ok {
-		proxyConn, err = contextDialer.DialContext(ctx, "tcp", caller.server)
-	} else {
-		proxyConn, err = caller.proxy.Dial("tcp", caller.server)
+	if caller.client.Net == "udp" {
+		if caller.proxy == nil {
+			r, _, err = caller.client.ExchangeContext(ctx, request, caller.server)
+			return
+		}
+		// UDP through proxy is not well-supported by dns.Client, use short-lived TCP
 	}
 
+	conn, err := caller.getConn()
 	if err != nil {
-		if caller.socks5FallbackDirect {
-			client := &dns.Client{Net: caller.client.Net}
-			r, _, directErr := client.Exchange(request, caller.server)
+		if caller.socks5FallbackDirect && caller.proxy != nil {
+			client := &dns.Client{Net: caller.client.Net, Timeout: caller.client.Timeout}
+			r, _, directErr := client.ExchangeContext(ctx, request, caller.server)
 			if directErr == nil {
 				return r, nil
 			}
 		}
 		return nil, err
 	}
-	defer func() { _ = proxyConn.Close() }()
 
-	// 使用局部变量 conn 确保线程安全
-	conn := &dns.Conn{Conn: proxyConn}
-	if caller.client.TLSConfig != nil { // dns over tls
-		conn.Conn = tls.Client(proxyConn, caller.client.TLSConfig)
-	}
-	// 发送dns请求
-	if err = conn.WriteMsg(request); err != nil {
+	if err = conn.SetWriteDeadline(time.Now().Add(caller.client.Timeout)); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
-	return conn.ReadMsg()
+	if err = conn.WriteMsg(request); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err = conn.SetReadDeadline(time.Now().Add(caller.client.Timeout)); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	r, err = conn.ReadMsg()
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	caller.putConn(conn)
+	return r, nil
 }
 
 // Exit caller退出时行为
@@ -96,14 +134,28 @@ func (caller *DNSCaller) String() string {
 
 // NewDNSCaller 创建一个UDP/TCP Caller
 func NewDNSCaller(server, network string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
-	client := &dns.Client{Net: network}
-	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
+	client := &dns.Client{Net: network, Timeout: 5 * time.Second}
+	caller := &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
+	if network == "tcp" || network == "tcp-tls" {
+		caller.pool = &sync.Pool{}
+	}
+	return caller
 }
 
 // NewDoTCaller 创建一个DoT Caller
 func NewDoTCaller(server, serverName string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
-	client := &dns.Client{Net: "tcp-tls", TLSConfig: &tls.Config{ServerName: serverName}}
-	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
+	client := &dns.Client{
+		Net:       "tcp-tls",
+		Timeout:   5 * time.Second,
+		TLSConfig: &tls.Config{ServerName: serverName},
+	}
+	return &DNSCaller{
+		client:               client,
+		server:               server,
+		proxy:                proxy,
+		socks5FallbackDirect: socks5FallbackDirect,
+		pool:                 &sync.Pool{},
+	}
 }
 
 // DoHCallerV2 DoT请求类，通过resolver自动解析域名

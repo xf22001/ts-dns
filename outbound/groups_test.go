@@ -80,14 +80,19 @@ func TestPostProcess(t *testing.T) {
 			Timeout: 0,
 			MockAdd: func(val string, _ int) error { v6val = val; return nil },
 		},
+		ipSetCh: make(chan ipSetTask, 1),
 	}
 	rr, err := dns.NewRR("z.cn 0 IN A 1.1.1.1")
 	assert.Nil(t, err)
 	group.PostProcess(nil, &dns.Msg{Answer: []dns.RR{rr}})
+	task := <-group.ipSetCh
+	_ = task.target.Add(task.val, task.timeout)
 	assert.Equal(t, "1.1.1.1", v4val)
 
 	rr, err = dns.NewRR("z.cn 0 IN AAAA ff80::1")
 	assert.Nil(t, err)
 	group.PostProcess(nil, &dns.Msg{Answer: []dns.RR{rr}})
+	task = <-group.ipSetCh
+	_ = task.target.Add(task.val, task.timeout)
 	assert.Equal(t, "ff80::1", v6val)
 }

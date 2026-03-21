@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -19,6 +20,7 @@ import (
 )
 
 var dialer, _ = proxy.SOCKS5("tcp", "", nil, proxy.Direct)
+var ctx = context.Background()
 
 func assertFail(t *testing.T, val *dns.Msg, err error) {
 	assert.Nil(t, val)
@@ -40,9 +42,9 @@ func MockMethodSeq(target interface{}, methodName string, outputs []gomonkey.Par
 func TestDNSCaller(t *testing.T) {
 	req := &dns.Msg{}
 
-	caller := NewDNSCaller("", "", nil, false)
-	// 不使用代理，mock掉Exchange
-	p := MockMethodSeq(caller.client, "Exchange", []gomonkey.Params{
+	caller := NewDNSCaller("", "udp", nil, false)
+	// 不使用代理，mock掉ExchangeContext
+	p := MockMethodSeq(caller.client, "ExchangeContext", []gomonkey.Params{
 		{nil, time.Second, fmt.Errorf("err")},
 		{&dns.Msg{}, time.Second, nil},
 	})
@@ -62,10 +64,10 @@ func TestDNSCaller(t *testing.T) {
 		{nil, fmt.Errorf("err")},
 		{&net.TCPConn{}, nil}, {&net.TCPConn{}, nil}, {&net.TCPConn{}, nil},
 	})
-	p2 := MockMethodSeq(caller.conn, "WriteMsg", []gomonkey.Params{
+	p2 := MockMethodSeq(&dns.Conn{}, "WriteMsg", []gomonkey.Params{
 		{fmt.Errorf("err")}, {nil}, {nil},
 	})
-	p3 := MockMethodSeq(caller.conn, "ReadMsg", []gomonkey.Params{
+	p3 := MockMethodSeq(&dns.Conn{}, "ReadMsg", []gomonkey.Params{
 		{nil, fmt.Errorf("err")}, {&dns.Msg{}, nil},
 	})
 	defer func() { p.Reset(); p1.Reset(); p2.Reset(); p3.Reset() }()
@@ -102,11 +104,11 @@ func TestDoHCallerV2(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	// 测试解析url失败的case
-	_, err := NewDoHCallerV2("\n", nil)
+	_, err := NewDoHCallerV2("\n", nil, false)
 	assert.NotNil(t, err)
-	_, err = NewDoHCallerV2("abc", nil)
+	_, err = NewDoHCallerV2("abc", nil, false)
 	assert.NotNil(t, err)
-	_, err = NewDoHCallerV2("https://abc::/", nil)
+	_, err = NewDoHCallerV2("https://abc::/", nil, false)
 	assert.NotNil(t, err)
 
 	url := "https://dns.alidns.com/dns-query"
