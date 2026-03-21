@@ -14,7 +14,7 @@ function main() {
 	DEST=$(pwd)/out
 	mkdir -p $DEST
 	cd cmd
-	go build -v -o $DEST -trimpath -ldflags "-w -s" -tags ""
+	go build -v -o $DEST/ts-dns -trimpath -ldflags "-w -s" -tags ""
 }
 
 main $@
