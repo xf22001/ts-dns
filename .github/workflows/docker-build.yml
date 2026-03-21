@@ -25,67 +25,53 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'  # 根据需要设置 Go 版本 (宿主机环境，用于 actions/setup-go 工具，容器内会重新安装)
+          go-version: '1.23'
 
       - name: Set environment variables
         run: |
-          echo "DEPLOYMENT=$(pwd)/build" >> $GITHUB_ENV
+          echo "DEPLOYMENT=${{ github.workspace }}/build" >> $GITHUB_ENV
           echo "DOCKER_DEPLOYMENT=/app/build" >> $GITHUB_ENV
           echo "GOOS=linux" >> $GITHUB_ENV
           echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
 
       - name: Build the project (in Docker)
         run: |
-          DOCKER_IMAGE="ubuntu:${{ github.event.inputs.os }}"
-
           if [ "$GOARCH" == "amd64" ]; then
-              DEST="$DEPLOYMENT/linux64"
-              DOCKER_DEST="$DOCKER_DEPLOYMENT/linux64"
+              DEST="${{ env.DEPLOYMENT }}/linux64"
+              DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux64"
           elif [ "$GOARCH" == "arm64" ]; then
-              DEST="$DEPLOYMENT/linux-arm64"
-              DOCKER_DEST="$DOCKER_DEPLOYMENT/linux-arm64"
-          fi
-
-          if [ -z "$DEST" ]; then
-              echo "Please set GOOS and GOARCH"
-              exit 1
+              DEST="${{ env.DEPLOYMENT }}/linux-arm64"
+              DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux-arm64"
           fi
 
           mkdir -p "$DEST"
 
+          # 1. 生成编译脚本（此处使用 'EOF' 禁用宿主机的变量替换，确保脚本原样进入容器）
+          cat << 'EOF' > .github/docker_build_internal.sh
+          set -e
+          apt-get update && apt-get install -y wget curl gnupg
+          wget -q https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
+          tar -C /usr/local -xzf go1.23.6.linux-amd64.tar.gz
+          export PATH=$PATH:/usr/local/go/bin
+          
+          go version
+          echo "Building for $GOOS/$GOARCH to $DEST"
+          
+          # 执行编译：由于指定了文件名，彻底解决 'cmd' 命名问题
+          go build -v -o "$DEST/ts-dns" -trimpath -ldflags "-w -s"
+          EOF
+
+          # 2. 运行 Docker：直接执行挂载进去的脚本，完全消除转义困扰
           docker run --rm \
             -v ${{ github.workspace }}:/app \
             -w /app/cmd \
             -e GOOS=$GOOS \
             -e GOARCH=$GOARCH \
-            -e VERSION=$VERSION \
-            -e TAGS="$TAGS" \
             -e DEST="$DOCKER_DEST" \
-            $DOCKER_IMAGE \
-            /bin/bash -c "
-              apt-get update && apt-get install -y wget curl gnupg
-              wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
-              tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
-              export PATH=\$PATH:/usr/local/go/bin
-              go version
-
-              # --- Debugging: Print Environment Variables ---
-              echo \"--- Environment Variables in Docker --- \"
-              env
-              echo \"--- End of Environment Variables --- \"
-
-              # --- Debugging: Print the go build command ---
-              BUILD_COMMAND="go build -v -o \$DEST/ts-dns -trimpath -ldflags '-w -s'"
-              echo "--- Go Build Command: --- "
-              echo \"\$BUILD_COMMAND\"
-              echo \"--- End of Go Build Command --- \"
-
-              eval \$BUILD_COMMAND # Execute the go build command using eval
-
-              rm go1.21.0.linux-amd64.tar.gz && apt-get autoremove -y && apt-get clean
-            "
+            ubuntu:${{ github.event.inputs.os }} \
+            /bin/bash /app/.github/docker_build_internal.sh
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
