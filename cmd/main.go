@@ -41,11 +41,15 @@ func main() {
 	logrus.SetOutput(io.MultiWriter(os.Stdout, file))
 
 	// 读取命令行参数
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
 	filename := flag.String("c", "ts-dns.toml", "config file path")
 	listen := flag.String("listen", "", "listen address/port/protocol")
 	showVer := flag.Bool("v", false, "show version and exit")
 	debugMode := flag.Bool("vv", false, "show debug log")
+	
 	flag.Parse()
+
 	if *showVer { // 显示版本号并退出
 		fmt.Println(VERSION)
 		os.Exit(0)

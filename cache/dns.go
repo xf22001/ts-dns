@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/dgraph-io/ristretto"
 	"github.com/miekg/dns"
 	"github.com/valyala/fastrand"
 	"github.com/wolf-joe/ts-dns/config"
@@ -41,11 +41,26 @@ func NewDNSCache(conf config.Conf) (IDNSCache, error) {
 	if minTTL > maxTTL {
 		return nil, fmt.Errorf("min ttl(%d) larger than max ttl(%d)", conf.Cache.MinTTL, conf.Cache.MaxTTL)
 	}
+
+	if conf.Cache.Size <= 0 {
+		return &dnsCache{maxSize: 0}, nil
+	}
+
+	// Ristretto configuration
+	// NumCounters: 10 * maxSize (recommended for frequency tracking)
+	// MaxCost: maxSize (number of items)
+	// BufferItems: 64 (recommended)
+	cache, err := ristretto.NewCache(&ristretto.Config{
+		NumCounters: int64(conf.Cache.Size) * 10,
+		MaxCost:     int64(conf.Cache.Size),
+		BufferItems: 64,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	c := &dnsCache{
-		items:   map[string]cacheItem{},
-		lock:    new(sync.RWMutex),
-		stopCh:  make(chan struct{}),
-		stopped: make(chan struct{}),
+		cache:   cache,
 		maxSize: conf.Cache.Size,
 		minTTL:  minTTL,
 		maxTTL:  maxTTL,
@@ -63,11 +78,7 @@ type cacheItem struct {
 }
 
 type dnsCache struct {
-	items   map[string]cacheItem
-	lock    *sync.RWMutex
-	stopCh  chan struct{}
-	stopped chan struct{}
-
+	cache   *ristretto.Cache
 	maxSize int
 	minTTL  time.Duration
 	maxTTL  time.Duration
@@ -83,24 +94,20 @@ func (c *dnsCache) cacheKey(req *dns.Msg) string {
 }
 
 func (c *dnsCache) Get(req *dns.Msg) *dns.Msg {
-	if c.maxSize <= 0 {
+	if c.maxSize <= 0 || c.cache == nil {
 		return nil
 	}
 	// check cache
 	key := c.cacheKey(req)
-	c.lock.RLock()
-	item, exists := c.items[key]
-	c.lock.RUnlock()
+	val, exists := c.cache.Get(key)
 	if !exists {
 		return nil
 	}
+	item := val.(cacheItem)
 	// ttl countdown
 	ttl := item.expiredAt - time.Now().Unix()
 	if ttl <= 0 {
-		// remove expired item
-		c.lock.Lock()
-		delete(c.items, key)
-		c.lock.Unlock()
+		c.cache.Del(key)
 		return nil
 	}
 	r := item.resp.Copy()
@@ -125,20 +132,12 @@ func (c *dnsCache) Get(req *dns.Msg) *dns.Msg {
 }
 
 func (c *dnsCache) Set(req *dns.Msg, resp *dns.Msg) {
-	if c.maxSize <= 0 || resp == nil || len(resp.Answer) == 0 {
-		return
-	}
-	// check size
-	c.lock.RLock()
-	length := len(c.items)
-	c.lock.RUnlock()
-	if length >= c.maxSize {
+	if c.maxSize <= 0 || c.cache == nil || resp == nil || len(resp.Answer) == 0 {
 		return
 	}
 	// copy resp to avoid data race
 	resp = resp.Copy()
 	// reset ttl
-	key := c.cacheKey(req)
 	var expire = c.maxTTL
 	for _, answer := range resp.Answer {
 		if ttl := time.Duration(answer.Header().Ttl) * time.Second; ttl < expire {
@@ -152,42 +151,19 @@ func (c *dnsCache) Set(req *dns.Msg, resp *dns.Msg) {
 		resp.Answer[i].Header().Ttl = uint32(expire.Seconds())
 	}
 	// set cache
+	key := c.cacheKey(req)
 	expiredAt := time.Now().Add(expire).Unix()
-	c.lock.Lock()
-	c.items[key] = cacheItem{resp: resp, expiredAt: expiredAt}
-	c.lock.Unlock()
+	// Ristretto automatically handles TTL with Cost and expiration
+	// We use 1 as cost for each DNS entry
+	c.cache.SetWithTTL(key, cacheItem{resp: resp, expiredAt: expiredAt}, 1, expire)
 }
 
 func (c *dnsCache) Start(_cleanTick ...time.Duration) {
-	c.stopCh = make(chan struct{})
-	c.stopped = make(chan struct{})
-	go func() {
-		cleanTick := time.Minute
-		if len(_cleanTick) > 0 {
-			cleanTick = _cleanTick[0]
-		}
-		tk := time.NewTicker(cleanTick)
-		for {
-			select {
-			case <-tk.C:
-				// clean expired key
-				c.lock.Lock()
-				for key, item := range c.items {
-					if time.Now().Unix() >= item.expiredAt {
-						delete(c.items, key)
-					}
-				}
-				c.lock.Unlock()
-			case <-c.stopCh:
-				tk.Stop()
-				close(c.stopped)
-				return
-			}
-		}
-	}()
+	// Ristretto handles background cleanup automatically
 }
 
 func (c *dnsCache) Stop() {
-	close(c.stopCh)
-	<-c.stopped
+	if c.cache != nil {
+		c.cache.Close()
+	}
 }
