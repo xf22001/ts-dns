@@ -25,7 +25,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.21'  # 根据需要设置 Go 版本
+          go-version: '1.23'
 
       - name: Set environment variables
         run: |
@@ -41,12 +41,14 @@ jobs:
             elif [ "$GOARCH" == "arm64" ]; then
               DEST="$DEPLOYMENT/windows-arm64"
             fi
+            BIN_NAME="ts-dns.exe"
           else
             if [ "$GOARCH" == "amd64" ]; then
               DEST="$DEPLOYMENT/linux64"
             elif [ "$GOARCH" == "arm64" ]; then
               DEST="$DEPLOYMENT/linux-arm64"
             fi
+            BIN_NAME="ts-dns"
           fi
           
           if [ -z "$DEST" ]; then
@@ -55,14 +57,8 @@ jobs:
           fi
 
           mkdir -p "$DEST"
-
           cd cmd
-
-          if [ "$GOOS" == "windows" ]; then
-            go build -v -o "$DEST/ts-dns.exe" -trimpath -ldflags "-w -s"
-          else
-            go build -v -o "$DEST/ts-dns" -trimpath -ldflags "-w -s"
-          fi
+          go build -v -o "$DEST/$BIN_NAME" -trimpath -ldflags "-w -s"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
