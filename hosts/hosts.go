@@ -24,6 +24,7 @@ func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 	domainMap := make(map[string]ipInfo, len(conf.Hosts))
 	regexMap := make(map[*regexp.Regexp]ipInfo, len(conf.Hosts))
 	load := func(host, ipStr string) error {
+		host = strings.ToLower(host)
 		ip := buildIPInfo(ipStr)
 		if ip == zeroIP {
 			return fmt.Errorf("parse %q to ip failed", ipStr)

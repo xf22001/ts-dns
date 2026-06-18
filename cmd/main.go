@@ -47,7 +47,7 @@ func main() {
 	listen := flag.String("listen", "", "listen address/port/protocol")
 	showVer := flag.Bool("v", false, "show version and exit")
 	debugMode := flag.Bool("vv", false, "show debug log")
-	
+
 	flag.Parse()
 
 	if *showVer { // 显示版本号并退出
@@ -62,6 +62,7 @@ func main() {
 	if _, err := toml.DecodeFile(*filename, &conf); err != nil {
 		logrus.Fatalf("load config file %q failed: %+v", *filename, err)
 	}
+	normalizeConf(&conf)
 	buf := bytes.NewBuffer(nil)
 	_ = toml.NewEncoder(buf).Encode(conf)
 	logrus.Debugf("load config success: %s", buf)
@@ -263,6 +264,7 @@ func reloadConf(ch chan os.Signal, filename *string, handler inbound.IHandler) {
 			logrus.Warnf("load config file %q failed: %+v", *filename, err)
 			continue
 		}
+		normalizeConf(&conf)
 		buf := bytes.NewBuffer(nil)
 		_ = toml.NewEncoder(buf).Encode(conf)
 		logrus.Debugf("reload config: %s", buf)
@@ -271,5 +273,11 @@ func reloadConf(ch chan os.Signal, filename *string, handler inbound.IHandler) {
 			continue
 		}
 		logrus.Infof("reload config success")
+	}
+}
+
+func normalizeConf(conf *config.Conf) {
+	if conf.QueryTimeout <= 0 && conf.Global.Timeout > 0 {
+		conf.QueryTimeout = conf.Global.Timeout
 	}
 }
