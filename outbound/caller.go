@@ -41,17 +41,11 @@ type DNSCaller struct {
 	server               string
 	proxy                proxy.Dialer
 	socks5FallbackDirect bool
-	pool                 *sync.Pool
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
 
 func (caller *DNSCaller) getConn() (*dns.Conn, error) {
-	if caller.pool != nil {
-		if v := caller.pool.Get(); v != nil {
-			return v.(*dns.Conn), nil
-		}
-	}
 	var netConn net.Conn
 	var err error
 	if caller.proxy == nil {
@@ -74,11 +68,7 @@ func (caller *DNSCaller) getConn() (*dns.Conn, error) {
 }
 
 func (caller *DNSCaller) putConn(conn *dns.Conn) {
-	if caller.pool != nil {
-		caller.pool.Put(conn)
-	} else {
-		_ = conn.Close()
-	}
+	_ = conn.Close()
 }
 
 // Call 向目标上游DNS转发请求
@@ -135,11 +125,7 @@ func (caller *DNSCaller) String() string {
 // NewDNSCaller 创建一个UDP/TCP Caller
 func NewDNSCaller(server, network string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
 	client := &dns.Client{Net: network, Timeout: 5 * time.Second}
-	caller := &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
-	if network == "tcp" || network == "tcp-tls" {
-		caller.pool = &sync.Pool{}
-	}
-	return caller
+	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
 }
 
 // NewDoTCaller 创建一个DoT Caller
@@ -154,7 +140,6 @@ func NewDoTCaller(server, serverName string, proxy proxy.Dialer, socks5FallbackD
 		server:               server,
 		proxy:                proxy,
 		socks5FallbackDirect: socks5FallbackDirect,
-		pool:                 &sync.Pool{},
 	}
 }
 
@@ -172,7 +157,8 @@ type DoHCallerV2 struct {
 
 	satisfyCh chan interface{} // 域名解析完成
 	requireCh chan *dns.Msg    // 要求解析域名
-	cancelCh  chan interface{} // stop run()
+	cancelCh  chan struct{}    // stop run()
+	stopOnce  sync.Once
 }
 
 func (caller *DoHCallerV2) Start(resolver dns.Handler) {
@@ -195,7 +181,10 @@ func (caller *DoHCallerV2) run(resolveCycle time.Duration, timeout time.Duration
 				caller.resolve(req, timeout)
 			}
 			caller.rwMux.Unlock()
-			caller.satisfyCh <- struct{}{} // 通知getClient()
+			select {
+			case caller.satisfyCh <- struct{}{}: // 通知getClient()
+			case <-caller.cancelCh:
+			}
 		case <-caller.cancelCh:
 			tick.Stop()
 			return
@@ -207,6 +196,10 @@ func (caller *DoHCallerV2) run(resolveCycle time.Duration, timeout time.Duration
 func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 	genClient := func(ip string) *http.Client {
 		return &http.Client{Transport: &http.Transport{
+			DisableKeepAlives:   true,
+			IdleConnTimeout:     10 * time.Second,
+			MaxIdleConnsPerHost: 0,
+			MaxConnsPerHost:     1,
 			DialContext: func(ctx context.Context, network, _ string) (conn net.Conn, err error) {
 				addr := ip + ":" + caller.port // 重写addr
 				return caller.dialer.Dial(network, addr)
@@ -259,19 +252,30 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 // 获取一个用于发送DoH查询请求的http客户端
 func (caller *DoHCallerV2) getClient(req *dns.Msg) *http.Client {
 	caller.rwMux.RLock()
-	defer caller.rwMux.RUnlock()
-	var n int
-	if n = len(caller.clients); n == 0 { // 域名未解析
+	n := len(caller.clients)
+	if n > 0 {
+		client := caller.clients[fastrand.Uint32n(uint32(n))]
 		caller.rwMux.RUnlock()
-		caller.requireCh <- req // 要求解析域名
-		<-caller.satisfyCh      // 等待解析完成
-		caller.rwMux.RLock()
-		if n = len(caller.clients); n == 0 {
-			return nil
-		}
-		goto CHOICE
+		return client
 	}
-CHOICE:
+	caller.rwMux.RUnlock()
+
+	select {
+	case caller.requireCh <- req: // 要求解析域名
+	case <-caller.cancelCh:
+		return nil
+	}
+	select {
+	case <-caller.satisfyCh: // 等待解析完成
+	case <-caller.cancelCh:
+		return nil
+	}
+
+	caller.rwMux.RLock()
+	defer caller.rwMux.RUnlock()
+	if n = len(caller.clients); n == 0 {
+		return nil
+	}
 	return caller.clients[fastrand.Uint32n(uint32(n))]
 }
 
@@ -300,6 +304,10 @@ func (caller *DoHCallerV2) Call(ctx context.Context, request *dns.Msg) (r *dns.M
 		if caller.socks5FallbackDirect {
 			// --- Fallback to direct connection ---
 			directClient := &http.Client{Transport: &http.Transport{
+				DisableKeepAlives:   true,
+				IdleConnTimeout:     10 * time.Second,
+				MaxIdleConnsPerHost: 0,
+				MaxConnsPerHost:     1,
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return caller.directDialer.DialContext(ctx, network, addr)
 				},
@@ -333,7 +341,9 @@ func (caller *DoHCallerV2) Call(ctx context.Context, request *dns.Msg) (r *dns.M
 // Exit 停止后台goroutine。caller退出时行为
 func (caller *DoHCallerV2) Exit() {
 	logrus.Debugf("stop caller %s", caller)
-	caller.cancelCh <- struct{}{}
+	caller.stopOnce.Do(func() {
+		close(caller.cancelCh)
+	})
 	logrus.Debugf("stop caller %s success", caller)
 }
 
@@ -385,6 +395,6 @@ func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer, socks5FallbackDirec
 	}
 	caller.requireCh = make(chan *dns.Msg, 1)
 	caller.satisfyCh = make(chan interface{}, 1)
-	caller.cancelCh = make(chan interface{}, 1)
+	caller.cancelCh = make(chan struct{})
 	return caller, nil
 }

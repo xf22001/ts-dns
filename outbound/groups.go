@@ -221,8 +221,8 @@ type groupImpl struct {
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
 
-	ipSet  iIPSet // 将响应中的IPv4地址加入ipset
-	ipSet6 iIPSet // 将响应中的IPv4地址加入ipset
+	ipSet   iIPSet // 将响应中的IPv4地址加入ipset
+	ipSet6  iIPSet // 将响应中的IPv4地址加入ipset
 	ipSetCh chan ipSetTask
 
 	stopCh  chan struct{}
@@ -314,6 +314,10 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
 				continue
 			}
+			if resp == nil {
+				logrus.Warnf("group %s call %s returned empty response", g.name, caller)
+				continue
+			}
 			g.processHijackRules(resp, true)
 			return &HandleResult{Msg: resp, CallerName: caller.String()}
 		}
@@ -326,7 +330,7 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	for _, caller := range g.callers {
 		go func(caller Caller) {
 			resp, err := caller.Call(ctx, req)
-			if err == nil {
+			if err == nil && resp != nil {
 				g.processHijackRules(resp, true)
 				respCh <- &callerResult{Msg: resp, CallerName: caller.String()}
 			} else {
@@ -348,7 +352,7 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	for i := 0; i < chLen; i++ {
 		select {
 		case cr := <-respCh:
-			if cr != nil {
+			if cr != nil && cr.Msg != nil {
 				return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 			}
 		case <-ctx.Done():
@@ -371,7 +375,7 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen i
 	var firstRespCallerName string
 	for i := 0; i < chLen; i++ {
 		cr := <-respCh // Changed resp to cr
-		if cr == nil {
+		if cr == nil || cr.Msg == nil {
 			continue
 		}
 		if firstCR == nil { // Store the first callerResult
@@ -513,14 +517,24 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 	}
 	// ipset worker
 	go func() {
+		handleTask := func(task ipSetTask) {
+			if err := task.target.Add(task.val, task.timeout); err != nil {
+				logrus.Warnf("add %s to ipset<%s> failed: %+v", task.val, task.target.GetName(), err)
+			}
+		}
 		for {
 			select {
 			case task := <-g.ipSetCh:
-				if err := task.target.Add(task.val, task.timeout); err != nil {
-					logrus.Warnf("add %s to ipset<%s> failed: %+v", task.val, task.target.GetName(), err)
-				}
+				handleTask(task)
 			case <-g.stopCh:
-				return
+				for {
+					select {
+					case task := <-g.ipSetCh:
+						handleTask(task)
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()

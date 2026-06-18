@@ -4,6 +4,7 @@ type Conf struct {
 	HostsFiles []string          `toml:"hosts_files"`
 	Hosts      map[string]string `toml:"hosts"`
 	Cache      CacheConf         `toml:"cache"`
+	Global     GlobalConf        `toml:"global"`
 
 	Groups        map[string]Group          `toml:"groups"`
 	DisableIPv6   bool                      `toml:"disable_ipv6"`
@@ -13,7 +14,13 @@ type Conf struct {
 	Listen       string `toml:"listen"`
 	QueryTimeout int    `toml:"query_timeout"` // 全局查询超时（秒）
 	SSLCertFile  string `toml:"ssl_cert_file"`
-	SSLKeyFile  string `toml:"ssl_key_file"`
+	SSLKeyFile   string `toml:"ssl_key_file"`
+}
+
+// GlobalConf 兼容旧配置文件中的 global section
+type GlobalConf struct {
+	HTTPTimeout int `toml:"http_timeout"`
+	Timeout     int `toml:"timeout"`
 }
 
 // CacheConf 配置文件中cache section对应的结构
