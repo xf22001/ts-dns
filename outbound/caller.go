@@ -40,7 +40,6 @@ type DNSCaller struct {
 	client               *dns.Client
 	server               string
 	proxy                proxy.Dialer
-	socks5FallbackDirect bool
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
@@ -83,13 +82,6 @@ func (caller *DNSCaller) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg
 
 	conn, err := caller.getConn()
 	if err != nil {
-		if caller.socks5FallbackDirect && caller.proxy != nil {
-			client := &dns.Client{Net: caller.client.Net, Timeout: caller.client.Timeout}
-			r, _, directErr := client.ExchangeContext(ctx, request, caller.server)
-			if directErr == nil {
-				return r, nil
-			}
-		}
 		return nil, err
 	}
 
@@ -123,27 +115,26 @@ func (caller *DNSCaller) String() string {
 }
 
 // NewDNSCaller 创建一个UDP/TCP Caller
-func NewDNSCaller(server, network string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
+func NewDNSCaller(server, network string, proxy proxy.Dialer) *DNSCaller {
 	client := &dns.Client{Net: network, Timeout: 5 * time.Second}
-	return &DNSCaller{client: client, server: server, proxy: proxy, socks5FallbackDirect: socks5FallbackDirect}
+	return &DNSCaller{client: client, server: server, proxy: proxy}
 }
 
 // NewDoTCaller 创建一个DoT Caller
-func NewDoTCaller(server, serverName string, proxy proxy.Dialer, socks5FallbackDirect bool) *DNSCaller {
+func NewDoTCaller(server, serverName string, proxy proxy.Dialer) *DNSCaller {
 	client := &dns.Client{
 		Net:       "tcp-tls",
 		Timeout:   5 * time.Second,
 		TLSConfig: &tls.Config{ServerName: serverName},
 	}
 	return &DNSCaller{
-		client:               client,
-		server:               server,
-		proxy:                proxy,
-		socks5FallbackDirect: socks5FallbackDirect,
+		client: client,
+		server: server,
+		proxy:  proxy,
 	}
 }
 
-// DoHCallerV2 DoT请求类，通过resolver自动解析域名
+// DoHCallerV2 DNS over HTTPS call, resolves upstream domain via internal resolver
 type DoHCallerV2 struct {
 	host                 string
 	port                 string
@@ -152,8 +143,6 @@ type DoHCallerV2 struct {
 	rwMux                sync.RWMutex
 	resolver             dns.Handler
 	dialer               proxy.Dialer
-	directDialer         net.Dialer
-	socks5FallbackDirect bool
 
 	satisfyCh chan interface{} // 域名解析完成
 	requireCh chan *dns.Msg    // 要求解析域名
@@ -172,15 +161,14 @@ func (caller *DoHCallerV2) run(resolveCycle time.Duration, timeout time.Duration
 	for {
 		select {
 		case <-tick.C:
-			caller.rwMux.Lock()
 			caller.resolve(nil, timeout)
-			caller.rwMux.Unlock()
 		case req := <-caller.requireCh: // getClient()触发
-			caller.rwMux.Lock()
-			if len(caller.clients) == 0 {
+			caller.rwMux.RLock()
+			hasClients := len(caller.clients) > 0
+			caller.rwMux.RUnlock()
+			if !hasClients {
 				caller.resolve(req, timeout)
 			}
-			caller.rwMux.Unlock()
 			select {
 			case caller.satisfyCh <- struct{}{}: // 通知getClient()
 			case <-caller.cancelCh:
@@ -224,9 +212,11 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 		}
 		done <- struct{}{}
 	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(timeout):
+	case <-timer.C:
 		return // 超时直接结束
 	}
 	// 解析响应中的ipv4地址
@@ -242,7 +232,9 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 		}
 	}
 	if len(clients) > 0 {
+		caller.rwMux.Lock()
 		caller.clients = clients
+		caller.rwMux.Unlock()
 		logrus.Debugf("%s resolve ip %s", caller, ips)
 	} else {
 		logrus.Warnf("%s resolve ip failed", caller)
@@ -301,29 +293,7 @@ func (caller *DoHCallerV2) Call(ctx context.Context, request *dns.Msg) (r *dns.M
 	resp, err = client.Do(req)
 
 	if err != nil {
-		if caller.socks5FallbackDirect {
-			// --- Fallback to direct connection ---
-			directClient := &http.Client{Transport: &http.Transport{
-				DisableKeepAlives:   true,
-				IdleConnTimeout:     10 * time.Second,
-				MaxIdleConnsPerHost: 0,
-				MaxConnsPerHost:     1,
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return caller.directDialer.DialContext(ctx, network, addr)
-				},
-			}}
-			directReq, _ := http.NewRequestWithContext(ctx, "POST", caller.url, bytes.NewBuffer(buf))
-			directReq.Header.Set("Content-Type", contentType)
-			directResp, directErr := directClient.Do(directReq)
-			if directErr == nil {
-				resp = directResp // Use the successful direct response
-				err = nil         // Clear the error
-			} else {
-				return nil, err // Both failed, return original proxy error
-			}
-		} else {
-			return nil, err // Not configured for fallback, return proxy error
-		}
+		return nil, err
 	}
 
 	defer func() { _ = resp.Body.Close() }()
@@ -358,7 +328,7 @@ func (caller *DoHCallerV2) SetResolver(resolver dns.Handler) {
 }
 
 // NewDoHCallerV2 创建一个DoHCaller，需要服务器url，可选代理
-func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer, socks5FallbackDirect bool) (*DoHCallerV2, error) {
+func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer) (*DoHCallerV2, error) {
 	// 解析url
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -376,22 +346,17 @@ func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer, socks5FallbackDirec
 		return nil, err
 	}
 
-	directDialer := net.Dialer{Timeout: 3 * time.Second} // Default direct dialer timeout
-
-	// If no proxyDialer is provided, use directDialer as the main dialer
-	// Otherwise, keep proxyDialer as the main dialer
+	// If no proxyDialer is provided, use a direct dialer
 	if proxyDialer == nil {
-		proxyDialer = &directDialer
+		proxyDialer = &net.Dialer{Timeout: 3 * time.Second}
 	}
 
 	caller := &DoHCallerV2{
-		host:                 host,
-		port:                 port,
-		url:                  u.String(),
-		rwMux:                sync.RWMutex{},
-		dialer:               proxyDialer,
-		directDialer:         directDialer, // Store a direct dialer for fallback
-		socks5FallbackDirect: socks5FallbackDirect,
+		host:   host,
+		port:   port,
+		url:    u.String(),
+		rwMux:  sync.RWMutex{},
+		dialer: proxyDialer,
 	}
 	caller.requireCh = make(chan *dns.Msg, 1)
 	caller.satisfyCh = make(chan interface{}, 1)

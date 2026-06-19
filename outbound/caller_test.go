@@ -39,10 +39,18 @@ func MockMethodSeq(target interface{}, methodName string, outputs []gomonkey.Par
 	return gomonkey.ApplyMethodSeq(reflect.TypeOf(target), methodName, cells)
 }
 
+type mockConn struct {
+	net.Conn
+}
+
+func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
+func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (m *mockConn) Close() error                       { return nil }
+
 func TestDNSCaller(t *testing.T) {
 	req := &dns.Msg{}
 
-	caller := NewDNSCaller("", "udp", nil, false)
+	caller := NewDNSCaller("", "udp", nil)
 	// 不使用代理，mock掉ExchangeContext
 	p := MockMethodSeq(caller.client, "ExchangeContext", []gomonkey.Params{
 		{nil, time.Second, fmt.Errorf("err")},
@@ -58,11 +66,11 @@ func TestDNSCaller(t *testing.T) {
 	caller.Exit()
 	_ = caller.String()
 
-	caller = NewDoTCaller("", "", dialer, false)
-	// 使用代理，mock掉Dial、WriteMsg、ReadMsg
-	p1 := MockMethodSeq(caller.proxy, "Dial", []gomonkey.Params{
+	caller = NewDoTCaller("", "", dialer)
+	// 使用代理，mock掉DialContext、WriteMsg、ReadMsg
+	p1 := MockMethodSeq(caller.proxy, "DialContext", []gomonkey.Params{
 		{nil, fmt.Errorf("err")},
-		{&net.TCPConn{}, nil}, {&net.TCPConn{}, nil}, {&net.TCPConn{}, nil},
+		{&mockConn{}, nil}, {&mockConn{}, nil}, {&mockConn{}, nil},
 	})
 	p2 := MockMethodSeq(&dns.Conn{}, "WriteMsg", []gomonkey.Params{
 		{fmt.Errorf("err")}, {nil}, {nil},
@@ -104,17 +112,17 @@ func TestDoHCallerV2(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	// 测试解析url失败的case
-	_, err := NewDoHCallerV2("\n", nil, false)
+	_, err := NewDoHCallerV2("\n", nil)
 	assert.NotNil(t, err)
-	_, err = NewDoHCallerV2("abc", nil, false)
+	_, err = NewDoHCallerV2("abc", nil)
 	assert.NotNil(t, err)
-	_, err = NewDoHCallerV2("https://abc::/", nil, false)
+	_, err = NewDoHCallerV2("https://abc::/", nil)
 	assert.NotNil(t, err)
 
 	url := "https://dns.alidns.com/dns-query"
 
 	// 测试run和stop
-	caller, err := NewDoHCallerV2(url, nil, false)
+	caller, err := NewDoHCallerV2(url, nil)
 	caller.Start(nil)
 	assert.Nil(t, err)
 	caller.Exit()
@@ -135,7 +143,7 @@ func TestDoHCallerV2(t *testing.T) {
 		time.Sleep(time.Second * 3)
 		return nil
 	})
-	caller, err = NewDoHCallerV2(url, nil, false)
+	caller, err = NewDoHCallerV2(url, nil)
 	assert.Nil(t, err)
 	caller.Start(resolver)
 	_, err = caller.Call(ctx, req)
@@ -147,7 +155,7 @@ func TestDoHCallerV2(t *testing.T) {
 		MsgHdr:   dns.MsgHdr{Id: 0xffff, RecursionDesired: true, AuthenticatedData: true},
 		Question: []dns.Question{{Name: "DNS.ALIDNS.COM.", Qtype: dns.TypeA, Qclass: dns.ClassINET}},
 	}
-	caller, err = NewDoHCallerV2(url, nil, false)
+	caller, err = NewDoHCallerV2(url, nil)
 	assert.Nil(t, err)
 	caller.Start(resolver)
 	_, err = caller.Call(ctx, recReq)
@@ -181,7 +189,7 @@ func TestDoHCallerV2(t *testing.T) {
 			&dns.A{A: net.IPv4(223, 5, 5, 5)},
 		}}
 	})
-	caller, err = NewDoHCallerV2(url, nil, false)
+	caller, err = NewDoHCallerV2(url, nil)
 	assert.Nil(t, err)
 	caller.Start(resolver)
 	// Pack失败

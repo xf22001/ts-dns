@@ -45,7 +45,6 @@ type Group struct {
 
 	Socks5 string `toml:"socks5"`
 
-	Socks5FallbackDirect bool     `toml:"socks5_fallback_direct"`
 	DNS                  []string `toml:"dns"`
 	DoT                  []string `toml:"dot"`
 	DoH                  []string `toml:"doh"`

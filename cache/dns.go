@@ -53,7 +53,7 @@ func NewDNSCache(conf config.Conf) (IDNSCache, error) {
 	cache, err := ristretto.NewCache(&ristretto.Config{
 		NumCounters: int64(conf.Cache.Size) * 10,
 		MaxCost:     int64(conf.Cache.Size),
-		BufferItems: 64,
+		BufferItems: 256,
 	})
 	if err != nil {
 		return nil, err
@@ -115,18 +115,17 @@ func (c *dnsCache) Get(req *dns.Msg) *dns.Msg {
 	for i := 0; i < len(r.Answer); i++ {
 		r.Answer[i].Header().Ttl = uint32(ttl)
 	}
-	// shuffle ip
-	first := uint32(len(r.Answer))
-	for ; first > 0; first-- {
-		if t := r.Answer[first-1].Header().Rrtype; t != dns.TypeA && t != dns.TypeAAAA {
-			break
+	// shuffle A/AAAA records among themselves for basic load balancing
+	ipIdx := make([]int, 0, len(r.Answer))
+	for i, rr := range r.Answer {
+		if rr.Header().Rrtype == dns.TypeA || rr.Header().Rrtype == dns.TypeAAAA {
+			ipIdx = append(ipIdx, i)
 		}
 	}
-	if ips := r.Answer[first:]; len(ips) > 1 {
-		for i := uint32(len(ips) - 1); i > 0; i-- {
-			j := fastrand.Uint32n(i + 1)
-			ips[i], ips[j] = ips[j], ips[i]
-		}
+	// in-place Fisher-Yates shuffle, only swapping A/AAAA-typed records
+	for i := len(ipIdx) - 1; i > 0; i-- {
+		j := int(fastrand.Uint32n(uint32(i + 1)))
+		r.Answer[ipIdx[i]], r.Answer[ipIdx[j]] = r.Answer[ipIdx[j]], r.Answer[ipIdx[i]]
 	}
 	return r
 }
@@ -156,6 +155,7 @@ func (c *dnsCache) Set(req *dns.Msg, resp *dns.Msg) {
 	// Ristretto automatically handles TTL with Cost and expiration
 	// We use 1 as cost for each DNS entry
 	c.cache.SetWithTTL(key, cacheItem{resp: resp, expiredAt: expiredAt}, 1, expire)
+	c.cache.Wait()
 }
 
 func (c *dnsCache) Start(_cleanTick ...time.Duration) {

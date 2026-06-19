@@ -92,10 +92,6 @@ func newHandle(conf config.Conf) (*handlerImpl, error) {
 	var err error
 	h := &handlerImpl{
 		disableQTypes: map[uint16]bool{},
-		cache:         nil,
-		hosts:         nil,
-		groups:        nil,
-		redirector:    nil,
 	}
 	// disable query types
 	if conf.DisableIPv6 {
@@ -270,6 +266,10 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 		return resp
 	}
 
+	// save original question before any group.Handle (may hijack-rewrite req)
+	savedQuestion := make([]dns.Question, len(req.Question))
+	copy(savedQuestion, req.Question)
+
 	// handle by matched group
 	var matched outbound.IGroup
 	var result *outbound.HandleResult
@@ -303,6 +303,9 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 			}
 		}
 	}
+
+	// restore original question for correct cache key (hijack may have mutated req)
+	req.Question = savedQuestion
 
 	// finally
 	if matched != nil {
