@@ -86,6 +86,9 @@ func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 				return nil, fmt.Errorf("load hosts file %q error: %w", filename, err)
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("load hosts file %q error: %w", filename, err)
+		}
 	}
 	return &HostReader{
 		domainMap: domainMap,

@@ -47,9 +47,11 @@ func FastestPingIP(ipAddr []string, tcpPort int, timeout time.Duration,
 		}(ip)
 	}
 	var fastestIP string // 第一个从chan返回的地址就是ping值最低的地址
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case fastestIP = <-pingDone:
-	case <-time.After(timeout):
+	case <-timer.C:
 	}
 	if fastestIP == "" {
 		return "", 0, errors.New("timeout")
