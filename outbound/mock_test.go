@@ -25,3 +25,4 @@ func (m mockGroup) Start(resolver dns.Handler)                           { m.Moc
 func (m mockGroup) Stop()                                                { m.MockStop() }
 func (m mockGroup) Name() string                                         { return m.MockName() }
 func (m mockGroup) String() string                                       { return m.MockString() }
+func (m mockGroup) HasGFWList() bool                                     { return false }

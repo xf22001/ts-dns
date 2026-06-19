@@ -37,6 +37,7 @@ type IGroup interface {
 	Stop()
 	Name() string
 	String() string
+	HasGFWList() bool
 }
 
 func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
@@ -229,6 +230,9 @@ type callerResult struct {
 func (g *groupImpl) Name() string     { return g.name }
 func (g *groupImpl) String() string   { return "group_" + g.Name() }
 func (g *groupImpl) IsFallback() bool { return g.fallback }
+func (g *groupImpl) HasGFWList() bool {
+	return g.gfwListURL != "" || atomic.LoadPointer(&g.gfwList) != nil
+}
 
 func (g *groupImpl) Match(req *dns.Msg) bool {
 	domain := ""
