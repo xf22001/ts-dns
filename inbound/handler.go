@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -122,7 +123,18 @@ func newHandle(conf config.Conf) (*handlerImpl, error) {
 		if group.IsFallback() {
 			h.fallbackGroup = group
 		}
+		h.groupList = append(h.groupList, group)
 	}
+	sort.Slice(h.groupList, func(i, j int) bool {
+		g1, g2 := h.groupList[i], h.groupList[j]
+		if g1.IsFallback() != g2.IsFallback() {
+			return !g1.IsFallback()
+		}
+		if g1.HasGFWList() != g2.HasGFWList() {
+			return !g1.HasGFWList()
+		}
+		return g1.Name() < g2.Name()
+	})
 	if h.fallbackGroup == nil {
 		return nil, errors.New("fallback group not found")
 	}
@@ -143,6 +155,7 @@ type handlerImpl struct {
 	cache         cache.IDNSCache
 	hosts         hosts.IDNSHosts
 	groups        map[string]outbound.IGroup
+	groupList     []outbound.IGroup
 	fallbackGroup outbound.IGroup
 	redirector    redirector.Redirector
 	queryTimeout  time.Duration
@@ -273,7 +286,7 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 	// handle by matched group
 	var matched outbound.IGroup
 	var result *outbound.HandleResult
-	for _, group := range h.groups {
+	for _, group := range h.groupList {
 		if group.Match(req) {
 			matched = group
 			result = group.Handle(ctx, req)
