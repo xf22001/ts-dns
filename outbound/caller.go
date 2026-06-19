@@ -184,10 +184,10 @@ func (caller *DoHCallerV2) run(resolveCycle time.Duration, timeout time.Duration
 func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 	genClient := func(ip string) *http.Client {
 		return &http.Client{Transport: &http.Transport{
-			DisableKeepAlives:   true,
-			IdleConnTimeout:     10 * time.Second,
-			MaxIdleConnsPerHost: 0,
-			MaxConnsPerHost:     1,
+			DisableKeepAlives:   false,
+			IdleConnTimeout:     30 * time.Second,
+			MaxIdleConnsPerHost: 4,
+			MaxConnsPerHost:     100,
 			DialContext: func(ctx context.Context, network, _ string) (conn net.Conn, err error) {
 				addr := ip + ":" + caller.port // 重写addr
 				return caller.dialer.Dial(network, addr)
