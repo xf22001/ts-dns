@@ -18,7 +18,7 @@ max_ttl = 86400  # 最大ttl，单位为秒
 
 [global]
   # DoH请求的超时时间（秒），必须小于下面的总超时时间
-  http_timeout = 2
+  http_timeout = 3
   # 查询组处理的总超时时间（秒）
   timeout = 5
 
