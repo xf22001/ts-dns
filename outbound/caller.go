@@ -148,11 +148,14 @@ type DoHCallerV2 struct {
 	requireCh chan *dns.Msg    // 要求解析域名
 	cancelCh  chan struct{}    // stop run()
 	stopOnce  sync.Once
+	startOnce sync.Once
 }
 
 func (caller *DoHCallerV2) Start(resolver dns.Handler) {
 	caller.resolver = resolver
-	go caller.run(time.Hour*24, time.Second)
+	caller.startOnce.Do(func() {
+		go caller.run(time.Hour*24, time.Second)
+	})
 }
 
 // 后台goroutine，负责定时/按需解析DoH服务器域名

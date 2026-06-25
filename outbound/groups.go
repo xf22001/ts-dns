@@ -110,7 +110,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			if err != nil {
 				return nil, fmt.Errorf("parse ecs %q failed: %w", conf.ECS, err)
 			}
-			logrus.Debugf("set ecs(%s) for group %s", conf.ECS, err)
+			logrus.Debugf("set ecs(%s) for group %s", conf.ECS, name)
 			g.withECS = ecs
 		}
 
@@ -217,6 +217,7 @@ type groupImpl struct {
 	ipSet6  iIPSet // 将响应中的IPv4地址加入ipset
 	ipSetCh chan ipSetTask
 
+	started int32
 	stopCh  chan struct{}
 	stopped chan struct{}
 }
@@ -507,6 +508,7 @@ func (g *groupImpl) grabGFWList() *matcher.ABPlus {
 }
 
 func (g *groupImpl) Start(resolver dns.Handler) {
+	atomic.StoreInt32(&g.started, 1)
 	for _, caller := range g.callers {
 		caller.Start(resolver)
 	}
@@ -557,6 +559,9 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 }
 
 func (g *groupImpl) Stop() {
+	if atomic.LoadInt32(&g.started) == 0 {
+		return
+	}
 	logrus.Debugf("stop group %s", g)
 	for _, caller := range g.callers {
 		caller.Exit()
