@@ -112,7 +112,7 @@ func newCidrRedirector(name string, conf config.RedirectorConf, groups map[strin
 	// find dst group
 	dst, exists := groups[conf.DstGroup]
 	if !exists {
-		return nil, fmt.Errorf("unkonwn dst group: %q", conf.DstGroup)
+		return nil, fmt.Errorf("unknown dst group: %q", conf.DstGroup)
 	}
 	// build ranger
 	ranger := cidranger.NewPCTrieRanger()
