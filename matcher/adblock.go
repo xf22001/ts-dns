@@ -3,7 +3,7 @@ package matcher
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -167,7 +167,7 @@ func NewABPByText(text string) (matcher *ABPlus) {
 
 // NewABPByFile 从文件内容读取AdBlock Plus规则
 func NewABPByFile(filename string, b64decode bool) (*ABPlus, error) {
-	raw, err := ioutil.ReadFile(filename)
+	raw, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("read file %q failed: %w", filename, err)
 	}

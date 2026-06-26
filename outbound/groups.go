@@ -114,7 +114,15 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			g.withECS = ecs
 		}
 
-		g.hijack = append([]string{}, conf.Hijack...)
+		g.hijack = make([]string, 0, len(conf.Hijack))
+		for _, rule := range conf.Hijack {
+			parts := strings.Split(rule, "/")
+			if len(parts) != 4 || parts[0] != "" || parts[3] != "" {
+				logrus.Warnf("group %s: invalid hijack rule %q, expected format /source/dest/", name, rule)
+				continue
+			}
+			g.hijack = append(g.hijack, rule)
+		}
 
 		// proxy
 		if conf.Socks5 != "" {
@@ -133,9 +141,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				addr, network = addr[:len(addr)-4], "tcp"
 			}
 			if addr != "" {
-				if !strings.Contains(addr, ":") {
-					addr += ":53"
-				}
+				addr = ensurePort(addr, "53")
 				callers = append(callers, NewDNSCaller(addr, network, g.proxy))
 			}
 		}
@@ -147,9 +153,7 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 				addr, serverName = arr[0], arr[1]
 			}
 			if addr != "" && serverName != "" {
-				if !strings.Contains(addr, ":") {
-					addr += ":853"
-				}
+				addr = ensurePort(addr, "853")
 				callers = append(callers, NewDoTCaller(addr, serverName, g.proxy))
 			}
 		}
@@ -261,11 +265,7 @@ func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
 	}
 
 	for _, rule := range g.hijack {
-		//logrus.Warnf("group %s", g.name)
 		parts := strings.Split(rule, "/")
-		if len(parts) != 4 || parts[0] != "" || parts[3] != "" {
-			continue // Skip invalid rule
-		}
 		source := parts[1]
 		dest := parts[2]
 
@@ -470,7 +470,7 @@ func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {
 	}
 }
 
-func (g *groupImpl) grabGFWList() *matcher.ABPlus {
+func (g *groupImpl) grabGFWList(ctx context.Context) *matcher.ABPlus {
 	if g.gfwListURL == "" {
 		return nil
 	}
@@ -483,7 +483,7 @@ func (g *groupImpl) grabGFWList() *matcher.ABPlus {
 		client.Transport = &http.Transport{DialContext: wrap}
 	}
 	// todo 自闭环解析dns
-	req, _ := http.NewRequest("GET", g.gfwListURL, nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", g.gfwListURL, nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		logrus.Warnf("get gfw list %q failed: %+v", g.gfwListURL, err)
@@ -535,23 +535,21 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 			}
 		}
 	}()
-	lastSuccess := time.Unix(0, 0)
-	tick := time.NewTicker(time.Minute)
+	tick := time.NewTicker(time.Hour)
 	go func() {
+		defer close(g.stopped)
+		defer tick.Stop()
+		// 首次启动时立即拉取
+		if m := g.grabGFWList(context.Background()); m != nil {
+			atomic.StorePointer(&g.gfwList, unsafe.Pointer(m))
+		}
 		for {
 			select {
 			case <-tick.C:
-				if time.Since(lastSuccess).Hours() < 1 {
-					// every hour
-					continue
-				}
-				if m := g.grabGFWList(); m != nil {
+				if m := g.grabGFWList(context.Background()); m != nil {
 					atomic.StorePointer(&g.gfwList, unsafe.Pointer(m))
-					lastSuccess = time.Now()
 				}
 			case <-g.stopCh:
-				close(g.stopped)
-				tick.Stop()
 				return
 			}
 		}
@@ -569,4 +567,16 @@ func (g *groupImpl) Stop() {
 	close(g.stopCh)
 	<-g.stopped
 	logrus.Debugf("stop group %s success", g)
+}
+
+// ensurePort ensures addr has a port appended. Handles IPv6 addresses correctly.
+// If addr already contains a port (e.g. "1.1.1.1:53", "[::1]:53"), it is returned as-is.
+// If addr has no port (e.g. "1.1.1.1", "::1", "[::1]"), defaultPort is appended.
+func ensurePort(addr, defaultPort string) string {
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr // already has port
+	}
+	// Strip brackets if present (e.g. "[::1]" → "::1") to avoid double-wrapping
+	addr = strings.Trim(addr, "[]")
+	return net.JoinHostPort(addr, defaultPort)
 }

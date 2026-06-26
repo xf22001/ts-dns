@@ -48,7 +48,7 @@ func (h *DohHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 			return
 		}
-		query, err = io.ReadAll(r.Body)
+		query, err = io.ReadAll(io.LimitReader(r.Body, 65536))
 		if err != nil {
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
