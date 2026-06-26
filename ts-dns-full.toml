@@ -37,7 +37,9 @@ max_ttl = 86400  # 最大ttl，单位为秒
   [groups.dirty]
   disable_qtypes = ["AAAA", "HTTPS"]  # 对指定组单独屏蔽IPv6/HTTPS查询
 
-  gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+  gfwlist_file = "gfwlist.txt" # 本地gfwlist文件路径（启动时加载，base64编码）
+  # gfwlist_url = "https://raw.githubusercontent.com/gfwlist/gfwlist/refs/heads/master/gfwlist.txt" # 远程URL（可选，定期拉取更新本地文件）
+  # gfwlist_update = "1h"      # 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
 
   socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
   dns = ["8.8.8.8", "1.1.1.1"]  # 如不想用socks5代理解析时推荐使用国外非53端口dns

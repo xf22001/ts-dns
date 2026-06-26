@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -62,10 +63,21 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 		if conf.IsSetGFWList() {
 			seenGFWList = true
 		}
+		// parse gfwlist update duration
+		gfwListUpdate := time.Hour // default 1h
+		if conf.GFWListUpdate != "" {
+			d, err := parseDuration(conf.GFWListUpdate)
+			if err != nil {
+				return nil, fmt.Errorf("parse gfwlist_update %q failed: %w", conf.GFWListUpdate, err)
+			}
+			gfwListUpdate = d
+		}
 		g := &groupImpl{
 			name:          name,
 			fallback:      conf.Fallback,
 			gfwListURL:    conf.GFWListURL,
+			gfwListFile:   conf.GFWListFile,
+			gfwListUpdate: gfwListUpdate,
 			noCookie:      conf.NoCookie,
 			concurrent:    conf.Concurrent,
 			fastestIP:     conf.FastestV4,
@@ -205,6 +217,8 @@ type groupImpl struct {
 	matcher       *matcher.ABPlus
 	gfwList       unsafe.Pointer // type: *matcher.ABPlus
 	gfwListURL    string
+	gfwListFile   string         // 本地 gfwlist 文件路径
+	gfwListUpdate time.Duration  // gfwlist_url 更新周期
 
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
@@ -470,7 +484,8 @@ func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {
 	}
 }
 
-func (g *groupImpl) grabGFWList(ctx context.Context) *matcher.ABPlus {
+// grabGFWList 从远程 URL 拉取 GFWList，返回 base64 解码后的文本内容
+func (g *groupImpl) grabGFWList(ctx context.Context) []byte {
 	if g.gfwListURL == "" {
 		return nil
 	}
@@ -482,7 +497,6 @@ func (g *groupImpl) grabGFWList(ctx context.Context) *matcher.ABPlus {
 		}
 		client.Transport = &http.Transport{DialContext: wrap}
 	}
-	// todo 自闭环解析dns
 	req, _ := http.NewRequestWithContext(ctx, "GET", g.gfwListURL, nil)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -499,12 +513,22 @@ func (g *groupImpl) grabGFWList(ctx context.Context) *matcher.ABPlus {
 		logrus.Warnf("read gfw list %q failed, error: %+v", g.gfwListURL, err)
 		return nil
 	}
+	if len(data) > 100 {
+		logrus.Debugf("gfw list raw data length: %d, first 100 bytes: %q", len(data), data[:100])
+	} else {
+		logrus.Debugf("gfw list raw data length: %d, content: %q", len(data), data)
+	}
 	dst := make([]byte, base64.StdEncoding.DecodedLen(len(data)))
-	if _, err = base64.StdEncoding.Decode(data, dst); err != nil {
-		logrus.Warnf("decode gfw list %q failed, error: %+v", g.gfwListURL, err)
+	n, err := base64.StdEncoding.Decode(dst, data)
+	if err != nil {
+		if len(data) > 50 {
+			logrus.Warnf("decode gfw list %q failed, error: %+v, first 50 bytes: %q", g.gfwListURL, err, data[:50])
+		} else {
+			logrus.Warnf("decode gfw list %q failed, error: %+v, content: %q", g.gfwListURL, err, data)
+		}
 		return nil
 	}
-	return matcher.NewABPByText(string(dst))
+	return dst[:n]
 }
 
 func (g *groupImpl) Start(resolver dns.Handler) {
@@ -535,25 +559,27 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 			}
 		}
 	}()
-	tick := time.NewTicker(time.Hour)
-	go func() {
-		defer close(g.stopped)
-		defer tick.Stop()
-		// 首次启动时立即拉取
-		if m := g.grabGFWList(context.Background()); m != nil {
-			atomic.StorePointer(&g.gfwList, unsafe.Pointer(m))
-		}
-		for {
-			select {
-			case <-tick.C:
-				if m := g.grabGFWList(context.Background()); m != nil {
-					atomic.StorePointer(&g.gfwList, unsafe.Pointer(m))
+	// 仅当配置了 gfwlist_url 时才启动后台更新
+	if g.gfwListURL != "" {
+		tick := time.NewTicker(g.gfwListUpdate)
+		go func() {
+			defer close(g.stopped)
+			defer tick.Stop()
+			// 首次启动时立即拉取
+			g.refreshGFWList()
+			for {
+				select {
+				case <-tick.C:
+					g.refreshGFWList()
+				case <-g.stopCh:
+					return
 				}
-			case <-g.stopCh:
-				return
 			}
-		}
-	}()
+		}()
+	} else {
+		// 没有 URL 更新，直接关闭 stopped
+		close(g.stopped)
+	}
 }
 
 func (g *groupImpl) Stop() {
@@ -579,4 +605,55 @@ func ensurePort(addr, defaultPort string) string {
 	// Strip brackets if present (e.g. "[::1]" → "::1") to avoid double-wrapping
 	addr = strings.Trim(addr, "[]")
 	return net.JoinHostPort(addr, defaultPort)
+}
+
+// refreshGFWList 从远程 URL 拉取 GFWList，写回本地文件并热更新匹配规则
+func (g *groupImpl) refreshGFWList() {
+	text := g.grabGFWList(context.Background())
+	if text == nil {
+		return
+	}
+	// 写回本地文件（base64 编码后存储，与原始 gfwlist.txt 格式一致）
+	if g.gfwListFile != "" {
+		encoded := base64.StdEncoding.EncodeToString(text)
+		if err := os.WriteFile(g.gfwListFile, []byte(encoded), 0640); err != nil {
+			logrus.Warnf("write gfw list to %q failed: %+v", g.gfwListFile, err)
+		} else {
+			logrus.Infof("gfw list saved to %q", g.gfwListFile)
+		}
+	}
+	// 热更新匹配规则
+	m := matcher.NewABPByText(string(text))
+	atomic.StorePointer(&g.gfwList, unsafe.Pointer(m))
+}
+
+// parseDuration 解析时间周期字符串，支持 m/h/d 后缀（如 30m、1h、2d）
+func parseDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	suffix := s[len(s)-1]
+	num := s[:len(s)-1]
+	var d time.Duration
+	var err error
+	switch suffix {
+	case 'm':
+		d, err = time.ParseDuration(num + "m")
+	case 'h':
+		d, err = time.ParseDuration(num + "h")
+	case 'd':
+		d, err = time.ParseDuration(num + "h")
+		if err == nil {
+			d *= 24
+		}
+	default:
+		d, err = time.ParseDuration(s)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("duration must be positive: %q", s)
+	}
+	return d, nil
 }

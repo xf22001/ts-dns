@@ -39,8 +39,9 @@ type Group struct {
 
 	Rules       []string `toml:"rules"`
 	RulesFile   string   `toml:"rules_file"`
-	GFWListFile string   `toml:"gfwlist_file"`
-	GFWListURL  string   `toml:"gfwlist_url"`
+	GFWListFile    string   `toml:"gfwlist_file"`
+	GFWListURL     string   `toml:"gfwlist_url"`
+	GFWListUpdate  string   `toml:"gfwlist_update"` // gfwlist_url 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
 	Fallback    bool     `toml:"fallback"`
 
 	Socks5 string `toml:"socks5"`
