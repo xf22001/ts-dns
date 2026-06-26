@@ -31,15 +31,6 @@ import (
 var VERSION = "dev"
 
 func main() {
-	file, err := os.OpenFile("ts-dns.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		logrus.Fatal(err)
-	}
-	defer file.Close()
-
-	// 使用 MultiWriter 同时写入到控制台和文件
-	logrus.SetOutput(io.MultiWriter(os.Stdout, file))
-
 	// 读取命令行参数
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
@@ -47,6 +38,7 @@ func main() {
 	listen := flag.String("listen", "", "listen address/port/protocol")
 	showVer := flag.Bool("v", false, "show version and exit")
 	debugMode := flag.Bool("vv", false, "show debug log")
+	logFile := flag.String("log", "ts-dns.log", "log file path")
 
 	flag.Parse()
 
@@ -54,6 +46,22 @@ func main() {
 		fmt.Println(VERSION)
 		os.Exit(0)
 	}
+
+	file, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	defer file.Close()
+
+	// 配置日志格式：时间 + 级别 + 消息
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+		DisableColors:   true, // 文件输出不需要颜色转义
+	})
+	// 使用 MultiWriter 同时写入到控制台和文件
+	logrus.SetOutput(io.MultiWriter(os.Stdout, file))
+
 	if *debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
@@ -82,7 +90,7 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("build handler failed: %+v", err)
 	}
-	// 监听SIGNUP命令
+	// 监听SIGHUP信号
 	signCh := make(chan os.Signal, 1)
 	signal.Notify(signCh, syscall.SIGHUP)
 	go reloadConf(signCh, filename, handler)
@@ -114,7 +122,7 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 			go runSrv("tcp")
 		}
 		wg.Wait()
-		logrus.Infof("ts-dns exists")
+		logrus.Infof("ts-dns exited")
 		return
 	}
 
@@ -203,12 +211,20 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 			IdleTimeout:  time.Second * 30,
 		}
 
-		// Watch for certificate changes if ReloadConfig is called
+		// Watch for certificate changes
+		certDone := make(chan struct{})
+		defer close(certDone)
 		go func() {
+			ticker := time.NewTicker(time.Minute * 10)
+			defer ticker.Stop()
 			for {
-				time.Sleep(time.Minute * 10) // Optional: period check
-				if _, err := loadCert(); err != nil {
-					logrus.Errorf("reload cert failed: %v", err)
+				select {
+				case <-ticker.C:
+					if _, err := loadCert(); err != nil {
+						logrus.Errorf("reload cert failed: %v", err)
+					}
+				case <-certDone:
+					return
 				}
 			}
 		}()
@@ -238,7 +254,7 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 	}
 
 	wg.Wait()
-	logrus.Infof("ts-dns exists")
+	logrus.Infof("ts-dns exited")
 }
 
 // expandHome expands the path to include the home directory if the path

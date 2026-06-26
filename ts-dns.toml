@@ -46,7 +46,8 @@ max_ttl = 86400  # 最大ttl，单位为秒
       "*gcr.io",
       "*withgoogle.com",
     ]
-    gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+    # gfwlist_file = "gfwlist.txt" # 匹配到gfwlist规则时使用该组
+    gfwlist_file = "https://raw.githubusercontent.com/gfwlist/gfwlist/refs/heads/master/gfwlist.txt" # 匹配到gfwlist规则时使用该组
     concurrent = true # 并发请求上游DNS
     socks5 = "127.0.0.1:1080"  # 当使用国外53端口dns解析时推荐用socks5代理解析
     doh = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"]  # dns over https服务器
