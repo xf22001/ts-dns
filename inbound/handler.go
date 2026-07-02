@@ -264,6 +264,11 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 		logrus.WithFields(fields).Info()
 	}()
 	// endregion
+	if len(req.Question) == 0 {
+		resp = new(dns.Msg)
+		resp.SetRcode(req, dns.RcodeFormatError)
+		return resp
+	}
 	for _, question := range req.Question {
 		if h.disableQTypes[question.Qtype] {
 			_info.blocked = true

@@ -134,7 +134,7 @@ func Test_newHandle(t *testing.T) {
 		rr1, _ := dns.NewRR("a.cn. 60 IN A 1.1.1.1")
 		rr2, _ := dns.NewRR("a.cn. 60 IN AAAA ::1")
 		resp.Answer = []dns.RR{rr1, rr2}
-		
+
 		h.cache.Set(req, resp)
 		// Ristretto is asynchronous
 		time.Sleep(time.Millisecond * 200)
@@ -143,6 +143,18 @@ func Test_newHandle(t *testing.T) {
 		h.ServeDNS(rw, req)
 		assert.NotNil(t, rw.Msg)
 		assert.Equal(t, 2, len(rw.Msg.Answer))
+	})
+	t.Run("empty question", func(t *testing.T) {
+		conf := defaultConf
+		conf.Cache.Size = 100
+		h, err := newHandle(conf)
+		assert.Nil(t, err)
+		assert.NotNil(t, h)
+
+		rw := utils.NewFakeRespWriter()
+		h.ServeDNS(rw, new(dns.Msg))
+		assert.NotNil(t, rw.Msg)
+		assert.Equal(t, dns.RcodeFormatError, rw.Msg.Rcode)
 	})
 	t.Run("group", func(t *testing.T) {
 		conf := defaultConf

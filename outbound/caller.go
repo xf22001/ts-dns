@@ -37,21 +37,22 @@ var (
 
 // DNSCaller UDP/TCP/DOT请求类
 type DNSCaller struct {
-	client               *dns.Client
-	server               string
-	proxy                proxy.Dialer
+	client *dns.Client
+	server string
+	proxy  proxy.Dialer
 }
 
 func (caller *DNSCaller) Start(_ dns.Handler) {}
 
-func (caller *DNSCaller) getConn() (*dns.Conn, error) {
+func (caller *DNSCaller) getConn(ctx context.Context) (*dns.Conn, error) {
 	var netConn net.Conn
 	var err error
 	if caller.proxy == nil {
-		netConn, err = net.DialTimeout(strings.Split(caller.client.Net, "-")[0], caller.server, caller.client.Timeout)
+		dialer := net.Dialer{Timeout: caller.client.Timeout}
+		netConn, err = dialer.DialContext(ctx, strings.Split(caller.client.Net, "-")[0], caller.server)
 	} else {
 		if contextDialer, ok := caller.proxy.(proxy.ContextDialer); ok {
-			netConn, err = contextDialer.DialContext(context.Background(), "tcp", caller.server)
+			netConn, err = contextDialer.DialContext(ctx, "tcp", caller.server)
 		} else {
 			netConn, err = caller.proxy.Dial("tcp", caller.server)
 		}
@@ -64,6 +65,14 @@ func (caller *DNSCaller) getConn() (*dns.Conn, error) {
 		dnsConn.Conn = tls.Client(netConn, caller.client.TLSConfig)
 	}
 	return dnsConn, nil
+}
+
+func (caller *DNSCaller) deadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(caller.client.Timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	return deadline
 }
 
 func (caller *DNSCaller) putConn(conn *dns.Conn) {
@@ -80,12 +89,12 @@ func (caller *DNSCaller) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg
 		// UDP through proxy is not well-supported by dns.Client, use short-lived TCP
 	}
 
-	conn, err := caller.getConn()
+	conn, err := caller.getConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	if err = conn.SetWriteDeadline(time.Now().Add(caller.client.Timeout)); err != nil {
+	if err = conn.SetWriteDeadline(caller.deadline(ctx)); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -93,7 +102,7 @@ func (caller *DNSCaller) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg
 		_ = conn.Close()
 		return nil, err
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(caller.client.Timeout)); err != nil {
+	if err = conn.SetReadDeadline(caller.deadline(ctx)); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -136,13 +145,13 @@ func NewDoTCaller(server, serverName string, proxy proxy.Dialer) *DNSCaller {
 
 // DoHCallerV2 DNS over HTTPS call, resolves upstream domain via internal resolver
 type DoHCallerV2 struct {
-	host                 string
-	port                 string
-	url                  string
-	clients              []*http.Client
-	rwMux                sync.RWMutex
-	resolver             dns.Handler
-	dialer               proxy.Dialer
+	host     string
+	port     string
+	url      string
+	clients  []*http.Client
+	rwMux    sync.RWMutex
+	resolver dns.Handler
+	dialer   proxy.Dialer
 
 	satisfyCh chan interface{} // 域名解析完成
 	requireCh chan *dns.Msg    // 要求解析域名
@@ -192,7 +201,13 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 			MaxIdleConnsPerHost: 4,
 			MaxConnsPerHost:     100,
 			DialContext: func(ctx context.Context, network, _ string) (conn net.Conn, err error) {
+				if ctx == nil {
+					ctx = context.Background()
+				}
 				addr := ip + ":" + caller.port // 重写addr
+				if contextDialer, ok := caller.dialer.(proxy.ContextDialer); ok {
+					return contextDialer.DialContext(ctx, network, addr)
+				}
 				return caller.dialer.Dial(network, addr)
 			},
 		}}
@@ -245,7 +260,7 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 }
 
 // 获取一个用于发送DoH查询请求的http客户端
-func (caller *DoHCallerV2) getClient(req *dns.Msg) *http.Client {
+func (caller *DoHCallerV2) getClient(ctx context.Context, req *dns.Msg) *http.Client {
 	caller.rwMux.RLock()
 	n := len(caller.clients)
 	if n > 0 {
@@ -259,10 +274,14 @@ func (caller *DoHCallerV2) getClient(req *dns.Msg) *http.Client {
 	case caller.requireCh <- req: // 要求解析域名
 	case <-caller.cancelCh:
 		return nil
+	case <-ctx.Done():
+		return nil
 	}
 	select {
 	case <-caller.satisfyCh: // 等待解析完成
 	case <-caller.cancelCh:
+		return nil
+	case <-ctx.Done():
 		return nil
 	}
 
@@ -277,7 +296,7 @@ func (caller *DoHCallerV2) getClient(req *dns.Msg) *http.Client {
 // Call 向上游DNS转发请求
 func (caller *DoHCallerV2) Call(ctx context.Context, request *dns.Msg) (r *dns.Msg, err error) {
 	// --- Original logic using proxy ---
-	client := caller.getClient(request)
+	client := caller.getClient(ctx, request)
 	if client == nil {
 		return nil, errors.New("empty client for doh caller")
 	}

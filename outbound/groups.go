@@ -217,16 +217,16 @@ type groupImpl struct {
 	matcher       *matcher.ABPlus
 	gfwList       unsafe.Pointer // type: *matcher.ABPlus
 	gfwListURL    string
-	gfwListFile   string         // 本地 gfwlist 文件路径
-	gfwListUpdate time.Duration  // gfwlist_url 更新周期
+	gfwListFile   string        // 本地 gfwlist 文件路径
+	gfwListUpdate time.Duration // gfwlist_url 更新周期
 
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
 
-	callers              []Caller
-	concurrent           bool
-	proxy                proxy.Dialer
-	hijack               []string
+	callers    []Caller
+	concurrent bool
+	proxy      proxy.Dialer
+	hijack     []string
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
@@ -339,13 +339,17 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	respCh := make(chan *callerResult, chLen)
 	for _, caller := range g.callers {
 		go func(caller Caller) {
+			var result *callerResult
 			resp, err := caller.Call(ctx, req)
 			if err == nil && resp != nil {
 				g.processHijackRules(resp, true)
-				respCh <- &callerResult{Msg: resp, CallerName: caller.String()}
+				result = &callerResult{Msg: resp, CallerName: caller.String()}
 			} else {
 				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
-				respCh <- nil // Send nil if error, meaning no valid *callerResult
+			}
+			select {
+			case respCh <- result:
+			case <-ctx.Done():
 			}
 		}(caller)
 	}
@@ -356,7 +360,7 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	}
 	if (qType == dns.TypeA || qType == dns.TypeAAAA) && g.fastestIP {
 		// 测速并返回最快ip
-		return g.fastestResp(qType, respCh, chLen)
+		return g.fastestResp(ctx, qType, respCh, chLen)
 	}
 	// 无需测速，只需返回第一个不为nil的DNS响应
 	for i := 0; i < chLen; i++ {
@@ -372,7 +376,7 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	return nil
 }
 
-func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen int) *HandleResult {
+func (g *groupImpl) fastestResp(ctx context.Context, qType uint16, respCh chan *callerResult, chLen int) *HandleResult {
 	const (
 		maxGoNum    = 15 // 最大并发量
 		pingTimeout = 500 * time.Millisecond
@@ -384,7 +388,15 @@ func (g *groupImpl) fastestResp(qType uint16, respCh chan *callerResult, chLen i
 	var firstResp *dns.Msg                              // 最早抵达的msg，当测速失败时返回该响应
 	var firstRespCallerName string
 	for i := 0; i < chLen; i++ {
-		cr := <-respCh // Changed resp to cr
+		var cr *callerResult
+		select {
+		case cr = <-respCh:
+		case <-ctx.Done():
+			if firstResp == nil {
+				return nil
+			}
+			return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+		}
 		if cr == nil || cr.Msg == nil {
 			continue
 		}
@@ -428,7 +440,19 @@ doPing:
 			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 		}
 	}
-	fastestIP, cost, err := utils.FastestPingIP(allIP, g.tcpPingPort, pingTimeout)
+	pingTO := pingTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < pingTO {
+			if remaining <= 0 {
+				if firstResp == nil {
+					return nil
+				}
+				return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+			}
+			pingTO = remaining
+		}
+	}
+	fastestIP, cost, err := utils.FastestPingIP(allIP, g.tcpPingPort, pingTO)
 	if err != nil {
 		if firstResp == nil {
 			return nil
