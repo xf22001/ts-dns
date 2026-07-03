@@ -14,6 +14,9 @@ on:
           - 24.04
           - latest
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,43 +30,42 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
+          cache: true
 
       - name: Set environment variables
         run: |
-          echo "DEPLOYMENT=${{ github.workspace }}/build" >> $GITHUB_ENV
-          echo "DOCKER_DEPLOYMENT=/app/build" >> $GITHUB_ENV
-          echo "GOOS=linux" >> $GITHUB_ENV
-          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+          echo "DEPLOYMENT=${{ github.workspace }}/build" >> "$GITHUB_ENV"
+          echo "DOCKER_DEPLOYMENT=/app/build" >> "$GITHUB_ENV"
+          echo "GOOS=linux" >> "$GITHUB_ENV"
+          echo "GOARCH=${{ matrix.arch }}" >> "$GITHUB_ENV"
 
       - name: Build the project (in Docker)
+        shell: bash
         run: |
-          if [ "$GOARCH" == "amd64" ]; then
-              DEST="${{ env.DEPLOYMENT }}/linux64"
-              DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux64"
-          elif [ "$GOARCH" == "arm64" ]; then
-              DEST="${{ env.DEPLOYMENT }}/linux-arm64"
-              DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux-arm64"
+          if [[ "$GOARCH" == "amd64" ]]; then
+            DEST="${{ env.DEPLOYMENT }}/linux64"
+            DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux64"
+          elif [[ "$GOARCH" == "arm64" ]]; then
+            DEST="${{ env.DEPLOYMENT }}/linux-arm64"
+            DOCKER_DEST="${{ env.DOCKER_DEPLOYMENT }}/linux-arm64"
           fi
 
           mkdir -p "$DEST"
 
-          # 1. 生成编译脚本（此处使用 'EOF' 禁用宿主机的变量替换，确保脚本原样进入容器）
           cat << 'EOF' > .github/docker_build_internal.sh
           set -e
-          apt-get update && apt-get install -y wget curl gnupg
-          wget -q https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
-          tar -C /usr/local -xzf go1.23.6.linux-amd64.tar.gz
+          apt-get update && apt-get install -y wget curl gnupg ca-certificates
+          wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+          tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
           export PATH=$PATH:/usr/local/go/bin
-          
+
           go version
           echo "Building for $GOOS/$GOARCH to $DEST"
-          
-          # 执行编译：由于指定了文件名，彻底解决 'cmd' 命名问题
-          go build -v -o "$DEST/ts-dns" -trimpath -ldflags "-w -s"
+
+          go build -C /app/cmd -v -o "$DEST/ts-dns" -trimpath -ldflags "-w -s" .
           EOF
 
-          # 2. 运行 Docker：直接执行挂载进去的脚本，完全消除转义困扰
           docker run --rm \
             -v ${{ github.workspace }}:/app \
             -w /app/cmd \

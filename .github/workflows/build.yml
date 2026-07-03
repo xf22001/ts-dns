@@ -1,7 +1,7 @@
 name: Build and Upload Artifacts
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch: # 手动触发
     inputs:
       os:
         description: 'Select OS'
@@ -12,53 +12,57 @@ on:
           - ubuntu-20.04
           - ubuntu-latest
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ${{ github.event.inputs.os }}
     strategy:
       matrix:
-        arch: [amd64,arm64]
+        arch: [amd64, arm64]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
+          cache: true
 
       - name: Set environment variables
         run: |
-          echo "DEPLOYMENT=$(pwd)/build" >> $GITHUB_ENV
-          echo "GOOS=${{ github.event.inputs.os == 'windows-latest' && 'windows' || 'linux' }}" >> $GITHUB_ENV
-          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+          echo "DEPLOYMENT=$(pwd)/build" >> "$GITHUB_ENV"
+          echo "GOOS=${{ github.event.inputs.os == 'windows-latest' && 'windows' || 'linux' }}" >> "$GITHUB_ENV"
+          echo "GOARCH=${{ matrix.arch }}" >> "$GITHUB_ENV"
 
       - name: Build the project
+        shell: bash
         run: |
-          if [ "$GOOS" == "windows" ]; then
-            if [ "$GOARCH" == "amd64" ]; then
+          if [[ "$GOOS" == "windows" ]]; then
+            if [[ "$GOARCH" == "amd64" ]]; then
               DEST="$DEPLOYMENT/windows64"
-            elif [ "$GOARCH" == "arm64" ]; then
+            elif [[ "$GOARCH" == "arm64" ]]; then
               DEST="$DEPLOYMENT/windows-arm64"
             fi
             BIN_NAME="ts-dns.exe"
           else
-            if [ "$GOARCH" == "amd64" ]; then
+            if [[ "$GOARCH" == "amd64" ]]; then
               DEST="$DEPLOYMENT/linux64"
-            elif [ "$GOARCH" == "arm64" ]; then
+            elif [[ "$GOARCH" == "arm64" ]]; then
               DEST="$DEPLOYMENT/linux-arm64"
             fi
             BIN_NAME="ts-dns"
           fi
-          
-          if [ -z "$DEST" ]; then
-              echo "Please set GOOS and GOARCH"
-              exit 1
+
+          if [[ -z "$DEST" ]]; then
+            echo "Please set GOOS and GOARCH"
+            exit 1
           fi
 
           mkdir -p "$DEST"
-          cd cmd
-          go build -v -o "$DEST/$BIN_NAME" -trimpath -ldflags "-w -s"
+          go build -C cmd -v -o "$DEST/$BIN_NAME" -trimpath -ldflags "-w -s" .
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
