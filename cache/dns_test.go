@@ -34,7 +34,7 @@ func TestNewDNSCache(t *testing.T) {
 	c.Start(time.Second)
 	defer c.Stop()
 	c.Set(req, resp)
-	
+
 	// Wait for Ristretto to process the Set operation
 	var cached *dns.Msg
 	for i := 0; i < 20; i++ {
@@ -45,7 +45,7 @@ func TestNewDNSCache(t *testing.T) {
 		time.Sleep(time.Millisecond * 50)
 	}
 	assert.NotNil(t, cached)
-	
+
 	// expired by TTL
 	time.Sleep(time.Second * 2)
 	assert.Nil(t, c.Get(req))
@@ -74,7 +74,7 @@ func TestDNSCache_ECS(t *testing.T) {
 	c, _ := NewDNSCache(config.Conf{Cache: config.CacheConf{Size: 1024}})
 	req1 := new(dns.Msg)
 	req1.SetQuestion("z.cn.", dns.TypeA)
-	
+
 	// Add ECS option to req1
 	opt1 := &dns.OPT{
 		Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT},
@@ -94,7 +94,7 @@ func TestDNSCache_ECS(t *testing.T) {
 	resp.Answer = append(resp.Answer, rr)
 
 	c.Set(req1, resp)
-	
+
 	var cached *dns.Msg
 	for i := 0; i < 20; i++ {
 		cached = c.Get(req1)
@@ -135,7 +135,7 @@ func TestDNSCache_Shuffle(t *testing.T) {
 	}
 
 	c.Set(req, resp)
-	
+
 	var cached *dns.Msg
 	for i := 0; i < 20; i++ {
 		cached = c.Get(req)
@@ -176,7 +176,7 @@ func TestDNSCache_MinMaxTTL(t *testing.T) {
 	resp.Answer = append(resp.Answer, rr)
 
 	c.Set(req, resp)
-	
+
 	var cached *dns.Msg
 	for i := 0; i < 20; i++ {
 		cached = c.Get(req)
@@ -206,6 +206,33 @@ func TestDNSCache_MinMaxTTL(t *testing.T) {
 	}
 	assert.NotNil(t, cached)
 	assert.Equal(t, uint32(3600), cached.Answer[0].Header().Ttl)
+}
+
+func TestDNSCache_PreservesPerRecordTTL(t *testing.T) {
+	c, _ := NewDNSCache(config.Conf{Cache: config.CacheConf{
+		Size: 1024, MinTTL: 1, MaxTTL: 3600,
+	}})
+	req := new(dns.Msg)
+	req.SetQuestion("z.cn.", dns.TypeA)
+	resp := new(dns.Msg)
+	rr, _ := dns.NewRR("z.cn. 30 IN A 1.1.1.1")
+	resp.Answer = append(resp.Answer, rr)
+	rr, _ = dns.NewRR("z.cn. 120 IN A 1.1.1.2")
+	resp.Answer = append(resp.Answer, rr)
+
+	c.Set(req, resp)
+
+	var cached *dns.Msg
+	for i := 0; i < 20; i++ {
+		cached = c.Get(req)
+		if cached != nil {
+			break
+		}
+		time.Sleep(time.Millisecond * 50)
+	}
+	assert.NotNil(t, cached)
+	assert.Len(t, cached.Answer, 2)
+	assert.NotEqual(t, cached.Answer[0].Header().Ttl, cached.Answer[1].Header().Ttl)
 }
 
 func BenchmarkNewDNSCache(b *testing.B) {

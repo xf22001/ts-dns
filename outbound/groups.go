@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -284,17 +285,39 @@ func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
 		dest := parts[2]
 
 		for i := range msg.Question {
-			if reverse == false {
-				if strings.Contains(msg.Question[i].Name, source) {
-					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, source, dest, -1)
-				}
+			if !reverse {
+				msg.Question[i].Name = replaceDomainSuffix(msg.Question[i].Name, source, dest)
 			} else {
-				if strings.Contains(msg.Question[i].Name, dest) {
-					msg.Question[i].Name = strings.Replace(msg.Question[i].Name, dest, source, -1)
-				}
+				msg.Question[i].Name = replaceDomainSuffix(msg.Question[i].Name, dest, source)
 			}
 		}
 	}
+}
+
+func replaceDomainSuffix(name, source, dest string) string {
+	if name == "" || source == "" || dest == "" {
+		return name
+	}
+	original := name
+	hasTrailingDot := strings.HasSuffix(name, ".")
+	name = dns.Fqdn(name)
+	source = dns.Fqdn(source)
+	dest = dns.Fqdn(dest)
+
+	var replaced string
+	if strings.EqualFold(name, source) {
+		replaced = dest
+	} else {
+		suffix := "." + source
+		if len(name) <= len(suffix) || !strings.EqualFold(name[len(name)-len(suffix):], suffix) {
+			return original
+		}
+		replaced = name[:len(name)-len(source)] + dest
+	}
+	if !hasTrailingDot {
+		replaced = strings.TrimSuffix(replaced, ".")
+	}
+	return replaced
 }
 
 func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
@@ -560,8 +583,11 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 	for _, caller := range g.callers {
 		caller.Start(resolver)
 	}
+	var wg sync.WaitGroup
 	// ipset worker
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		handleTask := func(task ipSetTask) {
 			if err := task.target.Add(task.val, task.timeout); err != nil {
 				logrus.Warnf("add %s to ipset<%s> failed: %+v", task.val, task.target.GetName(), err)
@@ -586,8 +612,9 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 	// 仅当配置了 gfwlist_url 时才启动后台更新
 	if g.gfwListURL != "" {
 		tick := time.NewTicker(g.gfwListUpdate)
+		wg.Add(1)
 		go func() {
-			defer close(g.stopped)
+			defer wg.Done()
 			defer tick.Stop()
 			// 首次启动时立即拉取
 			g.refreshGFWList()
@@ -600,10 +627,11 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 				}
 			}
 		}()
-	} else {
-		// 没有 URL 更新，直接关闭 stopped
-		close(g.stopped)
 	}
+	go func() {
+		wg.Wait()
+		close(g.stopped)
+	}()
 }
 
 func (g *groupImpl) Stop() {
@@ -668,6 +696,10 @@ func parseDuration(s string) (time.Duration, error) {
 	case 'd':
 		d, err = time.ParseDuration(num + "h")
 		if err == nil {
+			const maxDuration = time.Duration(1<<63 - 1)
+			if d > maxDuration/24 {
+				return 0, fmt.Errorf("duration overflows: %q", s)
+			}
 			d *= 24
 		}
 	default:

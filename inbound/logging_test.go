@@ -42,7 +42,7 @@ func TestLoggingOfAllAnswerTypes(t *testing.T) {
 	// 2. Create a handler with cache enabled
 	conf := config.Conf{
 		Cache:  config.CacheConf{Size: 100},
-		Groups: map[string]config.Group{"fallback": {}}, 
+		Groups: map[string]config.Group{"fallback": {}},
 	}
 	h, err := newHandle(conf)
 	assert.Nil(t, err)

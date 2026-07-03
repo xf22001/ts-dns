@@ -17,12 +17,14 @@ type mockGroup struct {
 	MockString      func() string
 }
 
-func (m mockGroup) Match(req *dns.Msg) bool                              { return m.MockMatch(req) }
-func (m mockGroup) IsFallback() bool                                     { return m.MockIsFallback() }
-func (m mockGroup) Handle(ctx context.Context, req *dns.Msg) *HandleResult { return m.MockHandle(ctx, req) }
-func (m mockGroup) PostProcess(req *dns.Msg, resp *dns.Msg)              { m.MockPostProcess(req, resp) }
-func (m mockGroup) Start(resolver dns.Handler)                           { m.MockStart(resolver) }
-func (m mockGroup) Stop()                                                { m.MockStop() }
-func (m mockGroup) Name() string                                         { return m.MockName() }
-func (m mockGroup) String() string                                       { return m.MockString() }
-func (m mockGroup) HasGFWList() bool                                     { return false }
+func (m mockGroup) Match(req *dns.Msg) bool { return m.MockMatch(req) }
+func (m mockGroup) IsFallback() bool        { return m.MockIsFallback() }
+func (m mockGroup) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
+	return m.MockHandle(ctx, req)
+}
+func (m mockGroup) PostProcess(req *dns.Msg, resp *dns.Msg) { m.MockPostProcess(req, resp) }
+func (m mockGroup) Start(resolver dns.Handler)              { m.MockStart(resolver) }
+func (m mockGroup) Stop()                                   { m.MockStop() }
+func (m mockGroup) Name() string                            { return m.MockName() }
+func (m mockGroup) String() string                          { return m.MockString() }
+func (m mockGroup) HasGFWList() bool                        { return false }

@@ -37,19 +37,19 @@ type Group struct {
 	ECS           string   `toml:"ecs"`
 	NoCookie      bool     `toml:"no_cookie"`
 
-	Rules       []string `toml:"rules"`
-	RulesFile   string   `toml:"rules_file"`
-	GFWListFile    string   `toml:"gfwlist_file"`
-	GFWListURL     string   `toml:"gfwlist_url"`
-	GFWListUpdate  string   `toml:"gfwlist_update"` // gfwlist_url 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
-	Fallback    bool     `toml:"fallback"`
+	Rules         []string `toml:"rules"`
+	RulesFile     string   `toml:"rules_file"`
+	GFWListFile   string   `toml:"gfwlist_file"`
+	GFWListURL    string   `toml:"gfwlist_url"`
+	GFWListUpdate string   `toml:"gfwlist_update"` // gfwlist_url 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
+	Fallback      bool     `toml:"fallback"`
 
 	Socks5 string `toml:"socks5"`
 
-	DNS                  []string `toml:"dns"`
-	DoT                  []string `toml:"dot"`
-	DoH                  []string `toml:"doh"`
-	Hijack               []string `toml:"hijack"`
+	DNS    []string `toml:"dns"`
+	DoT    []string `toml:"dot"`
+	DoH    []string `toml:"doh"`
+	Hijack []string `toml:"hijack"`
 
 	Concurrent  bool `toml:"concurrent"`
 	FastestV4   bool `toml:"fastest_v4"`

@@ -110,6 +110,18 @@ func TestNewHostReader(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
+func TestHostReaderWildcardUsesMostSpecificPattern(t *testing.T) {
+	r, err := NewDNSHosts(config.Conf{Hosts: map[string]string{
+		"*.example.com":     "1.1.1.1",
+		"*.sub.example.com": "2.2.2.2",
+	}})
+	assert.Nil(t, err)
+
+	resp := r.Get(buildReq("a.sub.example.com.", dns.TypeA))
+	assert.NotNil(t, resp)
+	assert.Equal(t, "a.sub.example.com.\t0\tIN\tA\t2.2.2.2", resp.Answer[0].String())
+}
+
 func BenchmarkHostReader_Regexp(b *testing.B) {
 	hosts, err := NewDNSHosts(config.Conf{Hosts: map[string]string{
 		"z.cn":    "1.1.1.1",

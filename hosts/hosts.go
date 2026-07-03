@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -20,9 +21,15 @@ type IDNSHosts interface {
 	Get(req *dns.Msg) *dns.Msg
 }
 
+type hostPattern struct {
+	pattern string
+	reg     *regexp.Regexp
+	ip      ipInfo
+}
+
 func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 	domainMap := make(map[string]ipInfo, len(conf.Hosts))
-	regexMap := make(map[*regexp.Regexp]ipInfo, len(conf.Hosts))
+	patterns := make([]hostPattern, 0, len(conf.Hosts))
 	load := func(host, ipStr string) error {
 		host = strings.ToLower(host)
 		ip := buildIPInfo(ipStr)
@@ -41,7 +48,7 @@ func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 		if err != nil {
 			return fmt.Errorf("build host regexp %q failed: %w", host, err)
 		}
-		regexMap[reg] = ip
+		patterns = append(patterns, hostPattern{pattern: host, reg: reg, ip: ip})
 		return nil
 	}
 	// parse hosts
@@ -90,9 +97,15 @@ func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 			return nil, fmt.Errorf("load hosts file %q error: %w", filename, err)
 		}
 	}
+	sort.Slice(patterns, func(i, j int) bool {
+		if len(patterns[i].pattern) != len(patterns[j].pattern) {
+			return len(patterns[i].pattern) > len(patterns[j].pattern)
+		}
+		return patterns[i].pattern < patterns[j].pattern
+	})
 	return &HostReader{
 		domainMap: domainMap,
-		regexMap:  regexMap,
+		patterns:  patterns,
 	}, nil
 }
 
@@ -129,7 +142,7 @@ func buildIPInfo(val string) ipInfo {
 // HostReader 管理hosts
 type HostReader struct {
 	domainMap map[string]ipInfo
-	regexMap  map[*regexp.Regexp]ipInfo
+	patterns  []hostPattern
 }
 
 func (h *HostReader) Get(req *dns.Msg) *dns.Msg {
@@ -146,9 +159,9 @@ func (h *HostReader) Get(req *dns.Msg) *dns.Msg {
 		if res, exists := h.domainMap[host]; exists {
 			return res, true
 		}
-		for reg, res := range h.regexMap {
-			if reg.MatchString(host) {
-				return res, true
+		for _, pattern := range h.patterns {
+			if pattern.reg.MatchString(host) {
+				return pattern.ip, true
 			}
 		}
 		return zeroIP, false

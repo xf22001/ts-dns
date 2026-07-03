@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
@@ -47,7 +47,10 @@ var (
 
 // todo: add unittest
 type handlerWrapper struct {
-	handlerPtr unsafe.Pointer // type: *handlerImpl
+	lifecycleMu sync.Mutex
+	drainMu     sync.RWMutex
+	stopped     bool
+	handlerPtr  atomic.Pointer[handlerImpl]
 }
 
 func (w *handlerWrapper) ReloadConfig(conf config.Conf) error {
@@ -56,34 +59,53 @@ func (w *handlerWrapper) ReloadConfig(conf config.Conf) error {
 	if err != nil {
 		return fmt.Errorf("make new handler failed: %w", err)
 	}
+
+	w.lifecycleMu.Lock()
+	if w.stopped {
+		w.lifecycleMu.Unlock()
+		h.stop()
+		return errors.New("handler stopped")
+	}
 	h.start()
-	// swap handler
-	for {
-		old := atomic.LoadPointer(&w.handlerPtr)
-		if atomic.CompareAndSwapPointer(&w.handlerPtr, old, unsafe.Pointer(h)) {
-			if old != nil {
-				(*handlerImpl)(old).stop()
-			}
-			break
-		}
+	w.drainMu.Lock()
+	old := w.handlerPtr.Swap(h)
+	w.drainMu.Unlock()
+	w.lifecycleMu.Unlock()
+
+	if old != nil {
+		old.stop()
 	}
 	return nil
 }
 
 func (w *handlerWrapper) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
-	(*handlerImpl)(atomic.LoadPointer(&w.handlerPtr)).ServeDNS(writer, req)
+	w.drainMu.RLock()
+	defer w.drainMu.RUnlock()
+	h := w.handlerPtr.Load()
+	if h == nil {
+		resp := new(dns.Msg)
+		resp.SetRcode(req, dns.RcodeServerFailure)
+		if err := writer.WriteMsg(resp); err != nil {
+			logrus.Errorf("write msg failed: %v", err)
+		}
+		return
+	}
+	h.ServeDNS(writer, req)
 }
 
 func (w *handlerWrapper) Stop() {
-	for {
-		old := atomic.LoadPointer(&w.handlerPtr)
-		if old == nil {
-			return
-		}
-		if atomic.CompareAndSwapPointer(&w.handlerPtr, old, nil) {
-			(*handlerImpl)(old).stop()
-			return
-		}
+	w.lifecycleMu.Lock()
+	if w.stopped {
+		w.lifecycleMu.Unlock()
+		return
+	}
+	w.stopped = true
+	w.drainMu.Lock()
+	old := w.handlerPtr.Swap(nil)
+	w.drainMu.Unlock()
+	w.lifecycleMu.Unlock()
+	if old != nil {
+		old.stop()
 	}
 }
 

@@ -11,10 +11,9 @@
 #
 #================================================================
 function main() {
-	DEST=$(pwd)/out
-	mkdir -p $DEST
-	cd cmd
-	go build -v -o $DEST/ts-dns -trimpath -ldflags "-w -s" -tags ""
+	DEST="$(pwd)/out"
+	mkdir -p "$DEST"
+	go build -C cmd -v -o "$DEST/ts-dns" -trimpath -ldflags "-w -s" -tags "" .
 }
 
 main $@

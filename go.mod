@@ -1,6 +1,6 @@
 module github.com/wolf-joe/ts-dns
 
-go 1.17
+go 1.25
 
 require (
 	github.com/BurntSushi/toml v1.6.0

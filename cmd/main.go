@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,6 +32,11 @@ import (
 var VERSION = "dev"
 
 func main() {
+	exitCode := 0
+	defer func() {
+		os.Exit(exitCode)
+	}()
+
 	// 读取命令行参数
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
@@ -49,7 +55,9 @@ func main() {
 
 	file, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	if err != nil {
-		logrus.Fatal(err)
+		logrus.Error(err)
+		exitCode = 1
+		return
 	}
 	defer file.Close()
 
@@ -68,7 +76,9 @@ func main() {
 	// 读取配置文件
 	conf := config.Conf{}
 	if _, err := toml.DecodeFile(*filename, &conf); err != nil {
-		logrus.Fatalf("load config file %q failed: %+v", *filename, err)
+		logrus.Errorf("load config file %q failed: %+v", *filename, err)
+		exitCode = 1
+		return
 	}
 	normalizeConf(&conf)
 	buf := bytes.NewBuffer(nil)
@@ -83,103 +93,202 @@ func main() {
 		addr, network = parts[0], strings.ToLower(parts[1])
 	}
 	if network != "" && network != "udp" && network != "tcp" {
-		logrus.Fatalf("unknown network: %q", network)
+		logrus.Errorf("unknown network: %q", network)
+		exitCode = 1
+		return
 	}
 	// 构建handler
 	handler, err := inbound.NewHandler(conf)
 	if err != nil {
-		logrus.Fatalf("build handler failed: %+v", err)
+		logrus.Errorf("build handler failed: %+v", err)
+		exitCode = 1
+		return
 	}
+	defer handler.Stop()
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// 监听SIGHUP信号
 	signCh := make(chan os.Signal, 1)
 	signal.Notify(signCh, syscall.SIGHUP)
-	go reloadConf(signCh, filename, handler)
+	defer signal.Stop(signCh)
+	go reloadConf(runCtx, signCh, filename, handler)
 
-	run(&conf, handler, addr, network)
+	if err := run(runCtx, &conf, handler, addr, network); err != nil {
+		logrus.Errorf("ts-dns stopped: %+v", err)
+		exitCode = 1
+		return
+	}
 }
 
-func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
+func run(ctx context.Context, conf *config.Conf, handler inbound.IHandler, addr, network string) error {
 	// Check if SSL certificate and key files are configured to enable DoH
 	enableDoh := conf.SSLCertFile != "" && conf.SSLKeyFile != ""
 
 	if !enableDoh {
-		// original logic without doh
-		wg := sync.WaitGroup{}
-		runSrv := func(net string) {
-			defer wg.Done()
-			srv := &dns.Server{Addr: addr, Net: net, Handler: handler}
-			logrus.Infof("listen on %s/%s", addr, net)
-			if err := srv.ListenAndServe(); err != nil {
-				logrus.Errorf("service stopped: %+v", err)
-			}
-		}
-		if network != "" {
-			wg.Add(1)
-			go runSrv(network)
-		} else {
-			wg.Add(2)
-			go runSrv("udp")
-			go runSrv("tcp")
-		}
-		wg.Wait()
-		logrus.Infof("ts-dns exited")
-		return
+		return runPlain(ctx, handler, addr, network)
 	}
 
 	// new logic with cmux
 	certFile, keyFile := expandHome(conf.SSLCertFile), expandHome(conf.SSLKeyFile)
 	if _, err := os.Stat(certFile); err != nil {
 		logrus.Warnf("cert file not found, fallback to non-doh mode: %s", certFile)
-		// Create a temporary config without SSL to run without DoH
-		tempConf := *conf
-		tempConf.SSLCertFile = ""
-		tempConf.SSLKeyFile = ""
-		run(&tempConf, handler, addr, network)
-		return
+		return runPlain(ctx, handler, addr, network)
 	}
 	if _, err := os.Stat(keyFile); err != nil {
 		logrus.Warnf("key file not found, fallback to non-doh mode: %s", keyFile)
-		// Create a temporary config without SSL to run without DoH
-		tempConf := *conf
-		tempConf.SSLCertFile = ""
-		tempConf.SSLKeyFile = ""
-		run(&tempConf, handler, addr, network)
-		return
+		return runPlain(ctx, handler, addr, network)
 	}
 
-	wg := sync.WaitGroup{}
-	// start udp server
+	return runDoH(ctx, handler, addr, network, certFile, keyFile)
+}
+
+func runPlain(ctx context.Context, handler inbound.IHandler, addr, network string) error {
+	type dnsRuntime struct {
+		name string
+		srv  *dns.Server
+	}
+
+	var runtimes []dnsRuntime
+	addUDP := func() error {
+		lc := net.ListenConfig{}
+		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+		if err != nil {
+			return fmt.Errorf("listen on %s/udp failed: %w", addr, err)
+		}
+		if udpConn, ok := pc.(*net.UDPConn); ok {
+			_ = udpConn.SetReadBuffer(2 * 1024 * 1024)
+			_ = udpConn.SetWriteBuffer(2 * 1024 * 1024)
+		}
+		runtimes = append(runtimes, dnsRuntime{name: "udp", srv: &dns.Server{PacketConn: pc, Handler: handler}})
+		return nil
+	}
+	addTCP := func() error {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen on %s/tcp failed: %w", addr, err)
+		}
+		runtimes = append(runtimes, dnsRuntime{name: "tcp", srv: &dns.Server{Listener: l, Handler: handler}})
+		return nil
+	}
+	closeRuntimes := func() {
+		for _, runtime := range runtimes {
+			_ = shutdownDNSServer(context.Background(), runtime.srv)
+		}
+	}
+
 	if network == "" || network == "udp" {
+		if err := addUDP(); err != nil {
+			return err
+		}
+	}
+	if network == "" || network == "tcp" {
+		if err := addTCP(); err != nil {
+			closeRuntimes()
+			return err
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(runtimes))
+	for _, runtime := range runtimes {
+		runtime := runtime
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Tune UDP buffer size
-			lc := net.ListenConfig{}
-			pc, err := lc.ListenPacket(context.Background(), "udp", addr)
-			if err != nil {
-				logrus.Fatalf("listen on %s/udp failed: %v", addr, err)
-			}
-			if udpConn, ok := pc.(*net.UDPConn); ok {
-				_ = udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
-				_ = udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
-			}
-			srv := &dns.Server{PacketConn: pc, Handler: handler}
-			logrus.Infof("listen on %s/udp", addr)
-			if err := srv.ActivateAndServe(); err != nil {
-				logrus.Fatalf("udp service stopped: %+v", err)
+			logrus.Infof("listen on %s/%s", addr, runtime.name)
+			if err := runtime.srv.ActivateAndServe(); err != nil && !isServerClosed(err) {
+				errCh <- fmt.Errorf("%s service stopped: %w", runtime.name, err)
 			}
 		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, runtime := range runtimes {
+			if err := shutdownDNSServer(shutdownCtx, runtime.srv); err != nil && !isServerClosed(err) {
+				logrus.Warnf("shutdown %s/%s failed: %+v", addr, runtime.name, err)
+			}
+		}
+		<-done
+		logrus.Infof("ts-dns exited")
+		return nil
+	case <-done:
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			logrus.Infof("ts-dns exited")
+			return nil
+		}
+	case err := <-errCh:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, runtime := range runtimes {
+			_ = shutdownDNSServer(shutdownCtx, runtime.srv)
+		}
+		<-done
+		return err
+	}
+}
+
+func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFile, keyFile string) error {
+
+	wg := sync.WaitGroup{}
+	errCh := make(chan error, 4)
+	var udpServer *dns.Server
+	var dohServer *http.Server
+	var mux cmux.CMux
+	var tcpListener net.Listener
+	var certDone chan struct{}
+	// start udp server
+	if network == "" || network == "udp" {
+		lc := net.ListenConfig{}
+		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+		if err != nil {
+			return fmt.Errorf("listen on %s/udp failed: %w", addr, err)
+		}
+		if udpConn, ok := pc.(*net.UDPConn); ok {
+			_ = udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+			_ = udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
+		}
+		udpServer = &dns.Server{PacketConn: pc, Handler: handler}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logrus.Infof("listen on %s/udp", addr)
+			if err := udpServer.ActivateAndServe(); err != nil && !isServerClosed(err) {
+				errCh <- fmt.Errorf("udp service stopped: %w", err)
+			}
+		}()
+	}
+	cleanupStarted := func() {
+		if udpServer != nil {
+			shutdownDNSServer(context.Background(), udpServer)
+		}
+		wg.Wait()
 	}
 
 	// start multiplexer on tcp
 	if network == "" || network == "tcp" {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
-			logrus.Fatalf("listen on %s/tcp failed: %v", addr, err)
+			cleanupStarted()
+			return fmt.Errorf("listen on %s/tcp failed: %w", addr, err)
 		}
-		defer l.Close()
+		tcpListener = l
 
 		m := cmux.New(l)
+		mux = m
 		m.SetReadTimeout(time.Second * 5) // Prevent Slowloris attacks on cmux level
 		tlsListener := m.Match(cmux.TLS())
 		anyListener := m.Match(cmux.Any())
@@ -196,9 +305,11 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 			return &cert, nil
 		}
 		if _, err := loadCert(); err != nil {
-			logrus.Fatalf("load cert failed: %v", err)
+			_ = l.Close()
+			cleanupStarted()
+			return fmt.Errorf("load cert failed: %w", err)
 		}
-		dohServer := &http.Server{
+		dohServer = &http.Server{
 			Handler: dohHandler,
 			TLSConfig: &tls.Config{
 				GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -212,9 +323,10 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 		}
 
 		// Watch for certificate changes
-		certDone := make(chan struct{})
-		defer close(certDone)
+		certDone = make(chan struct{})
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			ticker := time.NewTicker(time.Minute * 10)
 			defer ticker.Stop()
 			for {
@@ -233,7 +345,7 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 			defer wg.Done()
 			logrus.Infof("listen on %s/dns-query", addr)
 			if err := dohServer.ServeTLS(tlsListener, "", ""); err != nil && err != http.ErrServerClosed {
-				logrus.Fatalf("doh service stopped: %+v", err)
+				errCh <- fmt.Errorf("doh service stopped: %w", err)
 			}
 		}()
 
@@ -243,18 +355,93 @@ func run(conf *config.Conf, handler inbound.IHandler, addr, network string) {
 			defer wg.Done()
 			logrus.Infof("listen on %s/tcp", addr)
 			if err := dns.ActivateAndServe(anyListener, nil, handler); err != nil {
-				logrus.Fatalf("tcp service stopped: %+v", err)
+				if !isServerClosed(err) && !errors.Is(err, cmux.ErrServerClosed) && !errors.Is(err, cmux.ErrListenerClosed) {
+					errCh <- fmt.Errorf("tcp service stopped: %w", err)
+				}
 			}
 		}()
 
 		logrus.Infof("start cmux server on %s", addr)
-		if err := m.Serve(); err != nil {
-			logrus.Fatalf("cmux server failed: %v", err)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.Serve(); err != nil && !errors.Is(err, cmux.ErrServerClosed) && !errors.Is(err, cmux.ErrListenerClosed) {
+				errCh <- fmt.Errorf("cmux server failed: %w", err)
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	shutdown := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if certDone != nil {
+			close(certDone)
+		}
+		if dohServer != nil {
+			if err := dohServer.Shutdown(shutdownCtx); err != nil && err != http.ErrServerClosed {
+				logrus.Warnf("shutdown doh server failed: %+v", err)
+			}
+		}
+		if udpServer != nil {
+			if err := shutdownDNSServer(shutdownCtx, udpServer); err != nil && !isServerClosed(err) {
+				logrus.Warnf("shutdown udp server failed: %+v", err)
+			}
+		}
+		if mux != nil {
+			mux.Close()
+		}
+		if tcpListener != nil {
+			_ = tcpListener.Close()
 		}
 	}
 
-	wg.Wait()
+	select {
+	case <-ctx.Done():
+		shutdown()
+		<-done
+	case <-done:
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
+	case err := <-errCh:
+		shutdown()
+		<-done
+		return err
+	}
 	logrus.Infof("ts-dns exited")
+	return nil
+}
+
+func isServerClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "server closed") || strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func shutdownDNSServer(ctx context.Context, srv *dns.Server) error {
+	if srv == nil {
+		return nil
+	}
+	err := srv.ShutdownContext(ctx)
+	if err == nil || !strings.Contains(err.Error(), "server not started") {
+		return err
+	}
+	if srv.PacketConn != nil {
+		return srv.PacketConn.Close()
+	}
+	if srv.Listener != nil {
+		return srv.Listener.Close()
+	}
+	return err
 }
 
 // expandHome expands the path to include the home directory if the path
@@ -272,9 +459,13 @@ func expandHome(path string) string {
 	return filepath.Join(usr.HomeDir, path[1:])
 }
 
-func reloadConf(ch chan os.Signal, filename *string, handler inbound.IHandler) {
+func reloadConf(ctx context.Context, ch chan os.Signal, filename *string, handler inbound.IHandler) {
 	for {
-		<-ch
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+		}
 		conf := config.Conf{}
 		if _, err := toml.DecodeFile(*filename, &conf); err != nil {
 			logrus.Warnf("load config file %q failed: %+v", *filename, err)

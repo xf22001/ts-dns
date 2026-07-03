@@ -68,7 +68,7 @@ func (t *domainTrie) Match(domain string) (matched bool, isBlock bool, ok bool) 
 	// 1. "test.abc.com"
 	// 2. "abc.com"
 	// 3. "com"
-	
+
 	for i := 0; i < len(parts); i++ {
 		node := t.root
 		matchFound := true

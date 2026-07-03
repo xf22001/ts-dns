@@ -74,6 +74,7 @@ var (
 
 type cacheItem struct {
 	resp      *dns.Msg
+	cachedAt  int64
 	expiredAt int64
 }
 
@@ -104,16 +105,26 @@ func (c *dnsCache) Get(req *dns.Msg) *dns.Msg {
 		return nil
 	}
 	item := val.(cacheItem)
+	now := time.Now().Unix()
 	// ttl countdown
-	ttl := item.expiredAt - time.Now().Unix()
+	ttl := item.expiredAt - now
 	if ttl <= 0 {
 		c.cache.Del(key)
 		return nil
 	}
 	r := item.resp.Copy()
 	r.SetReply(req)
+	elapsed := now - item.cachedAt
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	for i := 0; i < len(r.Answer); i++ {
-		r.Answer[i].Header().Ttl = uint32(ttl)
+		answerTTL := int64(r.Answer[i].Header().Ttl) - elapsed
+		if answerTTL <= 0 {
+			c.cache.Del(key)
+			return nil
+		}
+		r.Answer[i].Header().Ttl = uint32(answerTTL)
 	}
 	// shuffle A/AAAA records among themselves for basic load balancing
 	ipIdx := make([]int, 0, len(r.Answer))
@@ -136,25 +147,28 @@ func (c *dnsCache) Set(req *dns.Msg, resp *dns.Msg) {
 	}
 	// copy resp to avoid data race
 	resp = resp.Copy()
-	// reset ttl
+	// Clamp each RR TTL independently while using the shortest one as cache TTL.
 	var expire = c.maxTTL
 	for _, answer := range resp.Answer {
-		if ttl := time.Duration(answer.Header().Ttl) * time.Second; ttl < expire {
+		ttl := time.Duration(answer.Header().Ttl) * time.Second
+		if ttl < c.minTTL {
+			ttl = c.minTTL
+		}
+		if ttl > c.maxTTL {
+			ttl = c.maxTTL
+		}
+		answer.Header().Ttl = uint32(ttl.Seconds())
+		if ttl < expire {
 			expire = ttl
 		}
 	}
-	if expire < c.minTTL {
-		expire = c.minTTL
-	}
-	for i := 0; i < len(resp.Answer); i++ {
-		resp.Answer[i].Header().Ttl = uint32(expire.Seconds())
-	}
 	// set cache
 	key := c.cacheKey(req)
-	expiredAt := time.Now().Add(expire).Unix()
+	now := time.Now()
+	expiredAt := now.Add(expire).Unix()
 	// Ristretto automatically handles TTL with Cost and expiration
 	// We use 1 as cost for each DNS entry
-	c.cache.SetWithTTL(key, cacheItem{resp: resp, expiredAt: expiredAt}, 1, expire)
+	c.cache.SetWithTTL(key, cacheItem{resp: resp, cachedAt: now.Unix(), expiredAt: expiredAt}, 1, expire)
 	c.cache.Wait()
 }
 

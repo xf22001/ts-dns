@@ -109,6 +109,37 @@ func TestPostProcess(t *testing.T) {
 	assert.Equal(t, "ff80::1", v6val)
 }
 
+func TestReplaceDomainSuffix(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		dest   string
+		want   string
+	}{
+		{"google.com.", "google.com", "google.cn", "google.cn."},
+		{"google.com", "google.com", "google.cn", "google.cn"},
+		{"www.google.com.", "google.com", "google.cn", "www.google.cn."},
+		{"a.b.google.com.", "google.com", "google.cn", "a.b.google.cn."},
+		{"www.Google.com.", "google.com", "google.cn", "www.google.cn."},
+		{"notgoogle.com.", "google.com", "google.cn", "notgoogle.com."},
+		{"google.com.evil.", "google.com", "google.cn", "google.com.evil."},
+		{"mygoogle.com.test.", "google.com", "google.cn", "mygoogle.com.test."},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, replaceDomainSuffix(c.name, c.source, c.dest))
+	}
+}
+
+func TestParseDurationDayOverflow(t *testing.T) {
+	d, err := parseDuration("2d")
+	assert.Nil(t, err)
+	assert.Equal(t, 48*time.Hour, d)
+
+	_, err = parseDuration("110000d")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "overflows")
+}
+
 func TestGroupFastestRespHonorsContext(t *testing.T) {
 	group := &groupImpl{
 		name:      "test",
