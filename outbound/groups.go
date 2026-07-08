@@ -80,7 +80,6 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			gfwListFile:   conf.GFWListFile,
 			gfwListUpdate: gfwListUpdate,
 			noCookie:      conf.NoCookie,
-			concurrent:    conf.Concurrent,
 			fastestIP:     conf.FastestV4,
 			tcpPingPort:   conf.TCPPingPort,
 			stopCh:        make(chan struct{}),
@@ -177,8 +176,10 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			}
 			callers = append(callers, caller)
 		}
-		g.callers = callers
-		// ipset
+		for _, caller := range callers {
+			wc := &indexedCaller{Caller: caller, index: len(g.allCallers)}
+			g.allCallers = append(g.allCallers, wc)
+		}
 		if name := conf.IPSet; name != "" {
 			is, err := ipset.New(name, "hash:ip", &ipset.Params{Timeout: conf.IPSetTTL})
 			if err != nil {
@@ -204,6 +205,31 @@ var (
 	_ IGroup = &groupImpl{}
 )
 
+// indexedCaller keeps the stable caller index used by per-host states.
+type indexedCaller struct {
+	Caller
+	index int
+}
+
+type callerState int64
+
+const (
+	callerIdle callerState = iota
+	callerActive
+
+	callerReselectInterval     = time.Hour
+	callerStatsTTL             = 24 * time.Hour
+	callerStatsCleanupInterval = 5 * time.Minute
+)
+
+type hostCallerStats struct {
+	activeIndex   int
+	state         callerState
+	seen          bool
+	lastUsed      time.Time
+	reselectAfter time.Time
+}
+
 type ipSetTask struct {
 	val     string
 	timeout int
@@ -224,13 +250,16 @@ type groupImpl struct {
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
 
-	callers    []Caller
-	concurrent bool
-	proxy      proxy.Dialer
-	hijack     []string
+	proxy  proxy.Dialer
+	hijack []string
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
+
+	allCallers  []*indexedCaller
+	hostStats   map[string]*hostCallerStats
+	lastCleanup time.Time
+	stateMu     sync.RWMutex
 
 	ipSet   iIPSet // 将响应中的IPv4地址加入ipset
 	ipSet6  iIPSet // 将响应中的IPv4地址加入ipset
@@ -244,6 +273,7 @@ type groupImpl struct {
 // callerResult holds the DNS message and the name of the caller that provided it.
 type callerResult struct {
 	Msg        *dns.Msg
+	Caller     *indexedCaller
 	CallerName string
 }
 
@@ -339,57 +369,68 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 
 	g.processHijackRules(req, false)
 
-	if !g.concurrent && !g.fastestIP {
-		// 依次请求上游DNS
-		for _, caller := range g.callers {
-			resp, err := caller.Call(ctx, req)
-			if err != nil {
-				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
-				continue
-			}
-			if resp == nil {
-				logrus.Warnf("group %s call %s returned empty response", g.name, caller)
-				continue
-			}
-			g.processHijackRules(resp, true)
-			return &HandleResult{Msg: resp, CallerName: caller.String()}
-		}
+	host := queryHost(req)
+	candidates := g.candidatesForHost(host)
+	if len(candidates) == 0 {
 		return nil
 	}
 
-	// 并发请求上游DNS
-	chLen := len(g.callers)
-	respCh := make(chan *callerResult, chLen)
-	for _, caller := range g.callers {
-		go func(caller Caller) {
-			var result *callerResult
-			resp, err := caller.Call(ctx, req)
-			if err == nil && resp != nil {
-				g.processHijackRules(resp, true)
-				result = &callerResult{Msg: resp, CallerName: caller.String()}
-			} else {
-				logrus.Warnf("group %s call %s failed: %+v", g.name, caller, err)
-			}
-			select {
-			case respCh <- result:
-			case <-ctx.Done():
-			}
-		}(caller)
-	}
-	// 处理响应
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	chLen := len(candidates)
+	respCh := g.runCallerAttempts(ctx, host, req, candidates)
+
+	var result *HandleResult
 	var qType uint16
 	if len(req.Question) > 0 {
 		qType = req.Question[0].Qtype
 	}
 	if (qType == dns.TypeA || qType == dns.TypeAAAA) && g.fastestIP {
 		// 测速并返回最快ip
-		return g.fastestResp(ctx, qType, respCh, chLen)
+		result = g.fastestResp(ctx, host, qType, respCh, chLen)
+	} else {
+		result = g.firstResponse(ctx, host, respCh, chLen)
 	}
-	// 无需测速，只需返回第一个不为nil的DNS响应
+
+	return result
+}
+
+func (g *groupImpl) runCallerAttempts(ctx context.Context, host string, req *dns.Msg, candidates []*indexedCaller) <-chan *callerResult {
+	respCh := make(chan *callerResult, len(candidates))
+	for _, caller := range candidates {
+		go func(caller *indexedCaller) {
+			result := g.runCallerAttempt(ctx, host, req, caller)
+			select {
+			case respCh <- result:
+			case <-ctx.Done():
+			}
+		}(caller)
+	}
+	return respCh
+}
+
+func (g *groupImpl) runCallerAttempt(ctx context.Context, host string, req *dns.Msg, wc *indexedCaller) *callerResult {
+	resp, err := wc.Call(ctx, req)
+	if err == nil && resp != nil {
+		g.processHijackRules(resp, true)
+		return &callerResult{Msg: resp, Caller: wc, CallerName: wc.String()}
+	}
+	if errors.Is(err, context.Canceled) {
+		logrus.Debugf("group %s call %s canceled", g.name, wc)
+		return nil
+	}
+	g.recordCallerFailure(host, wc)
+	logrus.Warnf("group %s call %s failed: %+v", g.name, wc, err)
+	return nil
+}
+
+func (g *groupImpl) firstResponse(ctx context.Context, host string, respCh <-chan *callerResult, chLen int) *HandleResult {
 	for i := 0; i < chLen; i++ {
 		select {
 		case cr := <-respCh:
 			if cr != nil && cr.Msg != nil {
+				g.recordCallerSuccess(host, cr.Caller)
 				return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 			}
 		case <-ctx.Done():
@@ -399,93 +440,183 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 	return nil
 }
 
-func (g *groupImpl) fastestResp(ctx context.Context, qType uint16, respCh chan *callerResult, chLen int) *HandleResult {
+func queryHost(req *dns.Msg) string {
+	if req == nil || len(req.Question) == 0 {
+		return ""
+	}
+	return strings.ToLower(dns.Fqdn(req.Question[0].Name))
+}
+
+func (g *groupImpl) candidatesForHost(host string) []*indexedCaller {
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
+
+	now := time.Now()
+	g.cleanupHostStatsLocked(now)
+	entry := g.hostStats[host]
+	if entry != nil {
+		entry.lastUsed = now
+	}
+	if entry == nil || !entry.seen {
+		return g.allCallerCandidates()
+	}
+	if entry.state == callerActive && !now.Before(entry.reselectAfter) {
+		return g.allCallerCandidates()
+	}
+	if entry.state == callerActive && entry.activeIndex >= 0 && entry.activeIndex < len(g.allCallers) {
+		return []*indexedCaller{g.allCallers[entry.activeIndex]}
+	}
+	return g.allCallerCandidates()
+}
+
+func (g *groupImpl) allCallerCandidates() []*indexedCaller {
+	candidates := make([]*indexedCaller, 0, len(g.allCallers))
+	for _, caller := range g.allCallers {
+		candidates = append(candidates, caller)
+	}
+	return candidates
+}
+
+func (g *groupImpl) recordCallerSuccess(host string, wc *indexedCaller) {
+	if wc == nil || wc.index < 0 || wc.index >= len(g.allCallers) {
+		return
+	}
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
+	now := time.Now()
+	entry := g.ensureHostStatsLocked(host)
+	shouldResetReselect := !entry.seen || entry.state != callerActive || entry.activeIndex != wc.index || !now.Before(entry.reselectAfter)
+	entry.activeIndex = wc.index
+	entry.state = callerActive
+	entry.seen = true
+	if shouldResetReselect {
+		entry.reselectAfter = now.Add(callerReselectInterval)
+	}
+}
+
+func (g *groupImpl) recordCallerFailure(host string, wc *indexedCaller) {
+	if wc == nil || wc.index < 0 || wc.index >= len(g.allCallers) {
+		return
+	}
+	g.stateMu.Lock()
+	defer g.stateMu.Unlock()
+	entry := g.ensureHostStatsLocked(host)
+	if !entry.seen || entry.activeIndex == wc.index {
+		entry.activeIndex = -1
+		entry.state = callerIdle
+		entry.seen = true
+	}
+}
+
+func (g *groupImpl) ensureHostStatsLocked(host string) *hostCallerStats {
+	if g.hostStats == nil {
+		g.hostStats = make(map[string]*hostCallerStats)
+	}
+	entry := g.hostStats[host]
+	if entry == nil {
+		entry = &hostCallerStats{activeIndex: -1}
+		g.hostStats[host] = entry
+	}
+	entry.lastUsed = time.Now()
+	return entry
+}
+
+func (g *groupImpl) hostStatsSnapshot(host string) hostCallerStats {
+	g.stateMu.RLock()
+	defer g.stateMu.RUnlock()
+	entry := g.hostStats[host]
+	if entry == nil {
+		return hostCallerStats{activeIndex: -1}
+	}
+	return *entry
+}
+
+func (g *groupImpl) cleanupHostStatsLocked(now time.Time) {
+	if !g.lastCleanup.IsZero() && now.Sub(g.lastCleanup) < callerStatsCleanupInterval {
+		return
+	}
+	g.lastCleanup = now
+	for host, entry := range g.hostStats {
+		if entry != nil && !entry.lastUsed.IsZero() && now.Sub(entry.lastUsed) > callerStatsTTL {
+			delete(g.hostStats, host)
+		}
+	}
+}
+
+func (g *groupImpl) fastestResp(ctx context.Context, host string, qType uint16, respCh <-chan *callerResult, chLen int) *HandleResult {
 	const (
 		maxGoNum    = 15 // 最大并发量
 		pingTimeout = 500 * time.Millisecond
 	)
-	// 从resp ch中提取所有IP地址，并建立IP地址到resp的映射
+	// 先选出最快返回的 caller，再在这份响应内选择最快 IP。
 	allIP := make([]string, 0, maxGoNum)
-	respMap := make(map[string]*callerResult, maxGoNum) // Change type
-	var firstCR *callerResult                           // Store the first callerResult
-	var firstResp *dns.Msg                              // 最早抵达的msg，当测速失败时返回该响应
-	var firstRespCallerName string
+	seenIP := make(map[string]struct{}, maxGoNum)
+	var cr *callerResult
 	for i := 0; i < chLen; i++ {
-		var cr *callerResult
 		select {
 		case cr = <-respCh:
 		case <-ctx.Done():
-			if firstResp == nil {
-				return nil
-			}
-			return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+			return nil
 		}
 		if cr == nil || cr.Msg == nil {
 			continue
 		}
-		if firstCR == nil { // Store the first callerResult
-			firstCR = cr
-			firstResp = cr.Msg
-			firstRespCallerName = cr.CallerName
-		}
-		for _, answer := range cr.Msg.Answer { // Access cr.Msg
-			var ip string
-			switch rr := answer.(type) {
-			case *dns.A:
-				if qType == dns.TypeA {
-					ip = rr.A.String()
-				}
-			case *dns.AAAA:
-				if qType == dns.TypeAAAA {
-					ip = rr.AAAA.String()
-				}
+		break
+	}
+	if cr == nil || cr.Msg == nil {
+		return nil
+	}
+
+	for _, answer := range cr.Msg.Answer {
+		var ip string
+		switch rr := answer.(type) {
+		case *dns.A:
+			if qType == dns.TypeA {
+				ip = rr.A.String()
 			}
-			if ip != "" {
-				allIP = append(allIP, ip)
-				if _, exists := respMap[ip]; !exists {
-					respMap[ip] = cr // Store callerResult
-					if len(respMap) >= maxGoNum {
-						goto doPing
-					}
-				}
+		case *dns.AAAA:
+			if qType == dns.TypeAAAA {
+				ip = rr.AAAA.String()
+			}
+		}
+		if ip != "" {
+			if _, exists := seenIP[ip]; exists {
+				continue
+			}
+			seenIP[ip] = struct{}{}
+			allIP = append(allIP, ip)
+			if len(allIP) >= maxGoNum {
+				break
 			}
 		}
 	}
-doPing:
-	switch len(respMap) {
+
+	switch len(allIP) {
 	case 0: // 没有任何IP地址
-		if firstResp == nil {
-			return nil
-		}
-		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+		g.recordCallerSuccess(host, cr.Caller)
+		return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 	case 1: // 只有一个IPv4地址
-		for _, cr := range respMap {
-			return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
-		}
+		g.recordCallerSuccess(host, cr.Caller)
+		return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 	}
 	pingTO := pingTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining < pingTO {
 			if remaining <= 0 {
-				if firstResp == nil {
-					return nil
-				}
-				return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+				g.recordCallerSuccess(host, cr.Caller)
+				return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 			}
 			pingTO = remaining
 		}
 	}
 	fastestIP, cost, err := utils.FastestPingIP(allIP, g.tcpPingPort, pingTO)
 	if err != nil {
-		if firstResp == nil {
-			return nil
-		}
-		return &HandleResult{Msg: firstResp, CallerName: firstRespCallerName}
+		g.recordCallerSuccess(host, cr.Caller)
+		return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 	}
 	logrus.Debugf("fastest ip of %s: %s(%dms)", allIP, fastestIP, cost)
-	chosenCR := respMap[fastestIP]          // Get the chosen callerResult
-	msg := chosenCR.Msg                     // Get Msg from callerResult
-	chosenCallerName := chosenCR.CallerName // Get CallerName
+	msg := cr.Msg
+	g.recordCallerSuccess(host, cr.Caller)
 
 	// 删除msg内除fastestIP之外的其它IP记录
 	for i := 0; i < len(msg.Answer); i++ {
@@ -504,7 +635,7 @@ doPing:
 		msg.Answer = append(msg.Answer[:i], msg.Answer[i+1:]...)
 		i--
 	}
-	return &HandleResult{Msg: msg, CallerName: chosenCallerName}
+	return &HandleResult{Msg: msg, CallerName: cr.CallerName}
 }
 
 func (g *groupImpl) PostProcess(_ *dns.Msg, resp *dns.Msg) {
@@ -580,8 +711,8 @@ func (g *groupImpl) grabGFWList(ctx context.Context) []byte {
 
 func (g *groupImpl) Start(resolver dns.Handler) {
 	atomic.StoreInt32(&g.started, 1)
-	for _, caller := range g.callers {
-		caller.Start(resolver)
+	for _, wc := range g.allCallers {
+		wc.Start(resolver)
 	}
 	var wg sync.WaitGroup
 	// ipset worker
@@ -639,8 +770,8 @@ func (g *groupImpl) Stop() {
 		return
 	}
 	logrus.Debugf("stop group %s", g)
-	for _, caller := range g.callers {
-		caller.Exit()
+	for _, wc := range g.allCallers {
+		wc.Exit()
 	}
 	close(g.stopCh)
 	<-g.stopped

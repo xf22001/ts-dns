@@ -49,7 +49,6 @@
   [groups]
     [groups.clean]
     dns = ["223.5.5.5", "114.114.114.114"]
-    concurrent = true
 
     [groups.dirty]
     dns = [""] # 省略

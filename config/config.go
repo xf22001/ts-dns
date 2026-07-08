@@ -51,7 +51,6 @@ type Group struct {
 	DoH    []string `toml:"doh"`
 	Hijack []string `toml:"hijack"`
 
-	Concurrent  bool `toml:"concurrent"`
 	FastestV4   bool `toml:"fastest_v4"`
 	TCPPingPort int  `toml:"tcp_ping_port"`
 

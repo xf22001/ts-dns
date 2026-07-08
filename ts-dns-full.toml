@@ -27,7 +27,6 @@ max_ttl = 86400  # 最大ttl，单位为秒
   ecs = "1.2.4.0/24"  # edns-client-subnet信息，配置后转发DNS请求时默认附带（已有ecs时不覆盖），暂不支持doh
   no_cookie = false  # 禁用edns cookie，默认false，dnspod(119.29.29.29)等特殊服务器需要设置为true
   dns = ["223.5.5.5:53", "114.114.114.114/tcp"]  # DNS服务器列表，默认使用53端口
-  concurrent = true  # 并发请求dns服务器列表
 
   fastest_v4 = true  # 选择ping值最低的ipv4地址作为响应，启用且使用icmp ping时建议以root权限允许本程序
   tcp_ping_port = 80  # 当启用fastest_v4时，如该值大于0则使用tcp ping，小于等于0则使用icmp ping
