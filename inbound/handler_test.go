@@ -115,10 +115,29 @@ func Test_newHandle(t *testing.T) {
 		h.ServeDNS(rw, buildReq("z.cn.", dns.TypeA))
 		assert.NotNil(t, rw.Msg)
 		assert.Nil(t, rw.Msg.Answer)
+		assert.Equal(t, dns.RcodeRefused, rw.Msg.Rcode)
 
 		rw = utils.NewFakeRespWriter()
 		h.ServeDNS(rw, buildReq("v6.cn.", dns.TypeAAAA))
 		assert.NotNil(t, rw.Msg)
+		assert.Nil(t, rw.Msg.Answer)
+		assert.Equal(t, dns.RcodeRefused, rw.Msg.Rcode)
+	})
+
+	t.Run("all upstreams fail -> SERVFAIL", func(t *testing.T) {
+		// 没有配置任何上游（dns/dot/doh 都为空）的兜底组，
+		// Handle 会因 candidate 为空直接返回 nil，
+		// ServeDNS 应当返回 SERVFAIL 以区分“查询失败”和“真实空结果”。
+		conf := defaultConf
+		conf.Cache.Size = 0
+		h, err := newHandle(conf)
+		assert.Nil(t, err)
+		assert.NotNil(t, h)
+
+		rw := utils.NewFakeRespWriter()
+		h.ServeDNS(rw, buildReq("any.nonexistent.invalid.", dns.TypeA))
+		assert.NotNil(t, rw.Msg)
+		assert.Equal(t, dns.RcodeServerFailure, rw.Msg.Rcode)
 		assert.Nil(t, rw.Msg.Answer)
 	})
 	t.Run("cache", func(t *testing.T) {

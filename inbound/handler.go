@@ -189,10 +189,8 @@ func (h *handlerImpl) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
 	resp := h.handle(ctx, writer, req)
 	if resp == nil {
 		resp = new(dns.Msg)
-	}
-	if !resp.Response {
-		resp.SetReply(req)
-	}
+		resp.SetRcode(req, dns.RcodeServerFailure)
+		}
 	if err := writer.WriteMsg(resp); err != nil {
 		logrus.Errorf("write msg failed: %v", err)
 	}
@@ -294,7 +292,9 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 	for _, question := range req.Question {
 		if h.disableQTypes[question.Qtype] {
 			_info.blocked = true
-			return nil // disabled
+			resp = new(dns.Msg)
+			resp.SetRcode(req, dns.RcodeRefused)
+			return resp
 		}
 	}
 	if resp = h.hosts.Get(req); resp != nil {
