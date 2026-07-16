@@ -33,6 +33,23 @@ func TestBuildGroups(t *testing.T) {
 		assert.NotNil(t, err)
 		t.Log(err)
 	})
+	t.Run("fastest config", func(t *testing.T) {
+		groups, err := BuildGroups(config.Conf{Groups: map[string]config.Group{
+			"g1": {
+				DNS:                  []string{"1.1.1.1"},
+				FastestIP:            true,
+				FastestPingTimeoutMs:  321,
+				FastestPingMaxIPs:     7,
+			},
+		}})
+		assert.Nil(t, err)
+		g, ok := groups["g1"].(*groupImpl)
+		if assert.True(t, ok) {
+			assert.True(t, g.fastestIP)
+			assert.Equal(t, 321, g.pingTimeout)
+			assert.Equal(t, 7, g.maxPingIPs)
+		}
+	})
 	t.Run("gfw", func(t *testing.T) {
 		_, err := BuildGroups(config.Conf{Groups: map[string]config.Group{
 			"g1": {GFWListFile: "not_exists.txt"},
