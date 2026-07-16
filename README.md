@@ -16,7 +16,7 @@
 * 支持将查询结果中的IPv4地址添加至IPSet
 ### 快速解析
 * 支持并发请求上游DNS，选择最快响应
-* 选择ping值最低的IPv4地址（tcp/icmp ping）
+* 选择ping值最低的IP地址（tcp/icmp ping）
 * 支持hosts/DNS缓存/屏蔽指定查询类型
 * 支持热重载配置文件
 
@@ -55,12 +55,12 @@
     gfwlist_file = "gfwlist.txt"
   ```
 
-2. 选择ping值最低的IPv4地址（启用时建议以root权限运行本程序）
+2. 选择ping值最低的IP地址（启用时建议以root权限运行本程序）
   ```toml
   # ...
   [groups.clean]
     dns = ["223.5.5.5", "114.114.114.114"]
-    fastest_v4 = true
+    fastest_ip = true
   # ...
   ```
 

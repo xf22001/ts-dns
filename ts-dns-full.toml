@@ -28,8 +28,10 @@ max_ttl = 86400  # 最大ttl，单位为秒
   no_cookie = false  # 禁用edns cookie，默认false，dnspod(119.29.29.29)等特殊服务器需要设置为true
   dns = ["223.5.5.5:53", "114.114.114.114/tcp"]  # DNS服务器列表，默认使用53端口
 
-  fastest_v4 = true  # 选择ping值最低的ipv4地址作为响应，启用且使用icmp ping时建议以root权限允许本程序
-  tcp_ping_port = 80  # 当启用fastest_v4时，如该值大于0则使用tcp ping，小于等于0则使用icmp ping
+  fastest_ip = true  # 选择ping值最低的IP地址作为响应，启用且使用icmp ping时建议以root权限允许本程序
+  tcp_ping_port = 80  # 当启用fastest_ip时，如该值大于0则使用tcp ping，小于等于0则使用icmp ping
+  fastest_ping_timeout_ms = 500  # 单次IP测速超时，单位毫秒
+  fastest_ping_max_ips = 15  # 参与测速的最大IP数量
 
   redirector = "oversea_ip2dirty" # 解析后判断是否需要重定向
 

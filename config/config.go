@@ -51,8 +51,10 @@ type Group struct {
 	DoH    []string `toml:"doh"`
 	Hijack []string `toml:"hijack"`
 
-	FastestV4   bool `toml:"fastest_v4"`
-	TCPPingPort int  `toml:"tcp_ping_port"`
+	FastestIP           bool `toml:"fastest_ip"`
+	TCPPingPort         int  `toml:"tcp_ping_port"`
+	FastestPingTimeoutMs int  `toml:"fastest_ping_timeout_ms"`
+	FastestPingMaxIPs    int  `toml:"fastest_ping_max_ips"`
 
 	IPSet    string `toml:"ipset"`
 	IPSet6   string `toml:"ipset6"`

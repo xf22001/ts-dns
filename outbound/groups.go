@@ -80,8 +80,10 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			gfwListFile:   conf.GFWListFile,
 			gfwListUpdate: gfwListUpdate,
 			noCookie:      conf.NoCookie,
-			fastestIP:     conf.FastestV4,
+			fastestIP:     conf.FastestIP,
 			tcpPingPort:   conf.TCPPingPort,
+			pingTimeout:   conf.FastestPingTimeoutMs,
+			maxPingIPs:    conf.FastestPingMaxIPs,
 			stopCh:        make(chan struct{}),
 			stopped:       make(chan struct{}),
 			disableQTypes: map[uint16]bool{},
@@ -255,6 +257,8 @@ type groupImpl struct {
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
+	pingTimeout int  // 测速超时，单位毫秒；<=0 时使用默认值
+	maxPingIPs  int  // 参与测速的最大IP数量；<=0 时使用默认值
 
 	allCallers  []*indexedCaller
 	hostStats   map[string]*hostCallerStats
@@ -545,9 +549,17 @@ func (g *groupImpl) cleanupHostStatsLocked(now time.Time) {
 
 func (g *groupImpl) fastestResp(ctx context.Context, host string, qType uint16, respCh <-chan *callerResult, chLen int) *HandleResult {
 	const (
-		maxGoNum    = 15 // 最大并发量
-		pingTimeout = 500 * time.Millisecond
+		defaultMaxGoNum    = 15
+		defaultPingTimeout = 500 * time.Millisecond
 	)
+	maxGoNum := defaultMaxGoNum
+	if g.maxPingIPs > 0 {
+		maxGoNum = g.maxPingIPs
+	}
+	pingTimeout := defaultPingTimeout
+	if g.pingTimeout > 0 {
+		pingTimeout = time.Duration(g.pingTimeout) * time.Millisecond
+	}
 	// 先选出最快返回的 caller，再在这份响应内选择最快 IP。
 	allIP := make([]string, 0, maxGoNum)
 	seenIP := make(map[string]struct{}, maxGoNum)
@@ -595,7 +607,7 @@ func (g *groupImpl) fastestResp(ctx context.Context, host string, qType uint16, 
 	case 0: // 没有任何IP地址
 		g.recordCallerSuccess(host, cr.Caller)
 		return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
-	case 1: // 只有一个IPv4地址
+	case 1: // 只有一个IP地址
 		g.recordCallerSuccess(host, cr.Caller)
 		return &HandleResult{Msg: cr.Msg, CallerName: cr.CallerName}
 	}
