@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/hosts"
 	"github.com/wolf-joe/ts-dns/outbound"
+	"github.com/wolf-joe/ts-dns/utils"
 	"github.com/wolf-joe/ts-dns/redirector"
 )
 
@@ -199,6 +201,14 @@ func (h *handlerImpl) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
 	}
 }
 
+// remoteHost 返回地址中的主机部分（去掉端口），用于日志展示客户端 IP。
+func remoteHost(addr net.Addr) string {
+	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+		return host
+	}
+	return addr.String()
+}
+
 func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req *dns.Msg) (resp *dns.Msg) {
 	// region log
 	_info := struct {
@@ -209,13 +219,29 @@ func (h *handlerImpl) handle(ctx context.Context, writer dns.ResponseWriter, req
 		fallback bool
 		redirect outbound.IGroup
 		caller   string // Add caller field for logging
+		skipLog  bool   // 非客户端请求（如内部解析）不打客户端查询日志
 	}{}
+	// 内部解析（如上游DoH域名）不是客户端请求，跳过统一日志
+	if rmi, ok := writer.(utils.RequestMeta); ok {
+		_info.skipLog = rmi.Internal()
+	}
 	begin := time.Now()
 	defer func() {
+		if _info.skipLog {
+			return
+		}
 		fields := logrus.Fields{
 			"cost":   strconv.FormatInt(time.Since(begin).Milliseconds(), 10) + "ms",
-			"remote": writer.RemoteAddr().String(),
+			"remote": remoteHost(writer.RemoteAddr()),
 		}
+		// 协议：真实连接取 RemoteAddr().Network()（udp/tcp）；DoH 等由写入器显式标记
+		proto := writer.RemoteAddr().Network()
+		if rmi, ok := writer.(utils.RequestMeta); ok {
+			if p := rmi.Proto(); p != "" {
+				proto = p
+			}
+		}
+		fields["proto"] = proto
 		if _info.blocked {
 			fields["blocked"] = true
 		}

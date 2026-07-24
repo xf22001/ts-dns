@@ -223,6 +223,8 @@ func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
 		Question: []dns.Question{{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}},
 	}
 	writer := utils.NewFakeRespWriter()
+	// 标记为非客户端请求（上游DoH域名的内部解析），不计入客户端查询日志
+	writer.SetInternal()
 	done := make(chan interface{}, 1)
 	go func() {
 		if caller.resolver != nil {

@@ -1,10 +1,35 @@
 # Telescope DNS Configure File
 # https://github.com/wolf-joe/ts-dns
 
-listen = ":53/udp"  # 监听地址，支持tcp/udp后缀，无后缀则同时监听tcp&udp。推荐使用命令行参数代替
+# ========== 监听配置 ==========
+# 方式一（默认，单端口复用）：无后缀同时监听 tcp&udp；带 /tcp、/udp 后缀则只监听对应协议。
+# 此时 DoH(HTTPS) 与 TCP DNS 在该端口上通过 cmux 自动区分。
+listen = ":53/udp"  # 推荐使用命令行参数 -listen 代替
 # ssl_cert_file = "ssl/cert.pem"  # SSL证书文件路径，配置后启用DoH
 # ssl_key_file = "ssl/key.pem"    # SSL密钥文件路径，配置后启用DoH
 # DOH endpoint will be available at https://<listen_address>/dns-query
+
+# 明文 HTTP DoH（可选）：供反向代理(如 nginx)终止 TLS 后转发 /dns-query 使用，
+# 仅需填端口号，ts-dns 固定绑 127.0.0.1:<端口>，不加载证书；ts-dns 通过
+# X-Forwarded-For / X-Forwarded-Proto 还原真实客户端地址与所用协议。
+# listen_doh_http = 53053
+
+# ---- 反向代理（nginx）示例 ----
+# 将明文 HTTP DoH 绑在 loopback，由 nginx 对外提供 HTTPS 并转发：
+#   listen_doh_http = 53053
+# nginx 配置（片段）：
+#   server {
+#       listen 443 ssl;
+#       location /dns-query {
+#           proxy_set_header Host $host;
+#           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#           proxy_set_header X-Forwarded-Proto $scheme;  # 让 ts-dns 记录真实协议(https)
+#           proxy_pass http://127.0.0.1:53053;          # 指向上面的 listen_doh_http
+#       }
+#   }
+# 说明：ts-dns 会信任 X-Forwarded-For / X-Forwarded-Proto（仅对明文 HTTP DoH 监听生效），
+#       取 XFF 中最右侧（代理直连对端）条目作为真实客户端，以此还原客户端地址与协议，
+#       日志记录远程 IP 与 proto=https；左侧条目为客户端可伪造，会被忽略。
 disable_qtypes = ["AAAA", "HTTPS"]  # 屏蔽IPv6/HTTPS查询
 
 hosts_files = ["/etc/hosts"]  # hosts文件路径，支持多hosts

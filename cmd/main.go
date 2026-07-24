@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,26 +126,31 @@ func main() {
 func run(ctx context.Context, conf *config.Conf, handler inbound.IHandler, addr, network string) error {
 	// Check if SSL certificate and key files are configured to enable DoH
 	enableDoh := conf.SSLCertFile != "" && conf.SSLKeyFile != ""
-
-	if !enableDoh {
-		return runPlain(ctx, handler, addr, network)
-	}
-
-	// new logic with cmux
 	certFile, keyFile := expandHome(conf.SSLCertFile), expandHome(conf.SSLKeyFile)
-	if _, err := os.Stat(certFile); err != nil {
-		logrus.Warnf("cert file not found, fallback to non-doh mode: %s", certFile)
-		return runPlain(ctx, handler, addr, network)
-	}
-	if _, err := os.Stat(keyFile); err != nil {
-		logrus.Warnf("key file not found, fallback to non-doh mode: %s", keyFile)
-		return runPlain(ctx, handler, addr, network)
+	if enableDoh {
+		if _, err := os.Stat(certFile); err != nil {
+			logrus.Warnf("cert file not found, disable DoH: %s", certFile)
+			enableDoh = false
+		} else if _, err := os.Stat(keyFile); err != nil {
+			logrus.Warnf("key file not found, disable DoH: %s", keyFile)
+			enableDoh = false
+		}
 	}
 
-	return runDoH(ctx, handler, addr, network, certFile, keyFile)
+	// 明文 HTTP DoH（反向代理用）：listen_doh_http 指定端口即开启，固定绑 127.0.0.1:<port>
+	dohHTTPAddr := ""
+	if conf.ListenDoHHTTP != 0 {
+		dohHTTPAddr = "127.0.0.1:" + strconv.Itoa(conf.ListenDoHHTTP)
+	}
+
+	// 单端口模式（cmux 复用 udp/tcp/doh），可附加明文 HTTP DoH（反向代理用）
+	if !enableDoh {
+		return runPlain(ctx, handler, addr, network, dohHTTPAddr)
+	}
+	return runDoH(ctx, handler, addr, network, certFile, keyFile, dohHTTPAddr)
 }
 
-func runPlain(ctx context.Context, handler inbound.IHandler, addr, network string) error {
+func runPlain(ctx context.Context, handler inbound.IHandler, addr, network, dohHTTPAddr string) error {
 	type dnsRuntime struct {
 		name string
 		srv  *dns.Server
@@ -191,7 +197,8 @@ func runPlain(ctx context.Context, handler inbound.IHandler, addr, network strin
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(runtimes))
+	errCh := make(chan error, 16) // 足够容纳所有可能 goroutine 上报的错误（当前上限约 6），避免阻塞
+	plainDoH := startPlaintextDoH(handler, dohHTTPAddr, &wg, errCh)
 	for _, runtime := range runtimes {
 		runtime := runtime
 		wg.Add(1)
@@ -210,15 +217,17 @@ func runPlain(ctx context.Context, handler inbound.IHandler, addr, network strin
 		close(done)
 	}()
 
-	select {
-	case <-ctx.Done():
+	shutdownRuntimes := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, runtime := range runtimes {
-			if err := shutdownDNSServer(shutdownCtx, runtime.srv); err != nil && !isServerClosed(err) {
-				logrus.Warnf("shutdown %s/%s failed: %+v", addr, runtime.name, err)
-			}
+			_ = shutdownDNSServer(shutdownCtx, runtime.srv)
 		}
+	}
+	select {
+	case <-ctx.Done():
+		shutdownRuntimes()
+		shutdownHTTPServer(plainDoH, "doh-http")
 		<-done
 		logrus.Infof("ts-dns exited")
 		return nil
@@ -231,22 +240,20 @@ func runPlain(ctx context.Context, handler inbound.IHandler, addr, network strin
 			return nil
 		}
 	case err := <-errCh:
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		for _, runtime := range runtimes {
-			_ = shutdownDNSServer(shutdownCtx, runtime.srv)
-		}
+		shutdownRuntimes()
+		shutdownHTTPServer(plainDoH, "doh-http")
 		<-done
 		return err
 	}
 }
 
-func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFile, keyFile string) error {
+func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFile, keyFile, dohHTTPAddr string) error {
 
 	wg := sync.WaitGroup{}
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 16) // 足够容纳所有可能 goroutine 上报的错误（当前上限约 6），避免阻塞
 	var udpServer *dns.Server
 	var dohServer *http.Server
+	var plainDoH *http.Server
 	var mux cmux.CMux
 	var tcpListener net.Listener
 	var certDone chan struct{}
@@ -294,7 +301,7 @@ func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFi
 		anyListener := m.Match(cmux.Any())
 
 		// start doh server
-		dohHandler := inbound.NewDohHandler(handler)
+		dohHandler := inbound.NewDohHandler(handler, false)
 		var certPtr atomic.Value
 		loadCert := func() (*tls.Certificate, error) {
 			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -371,6 +378,9 @@ func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFi
 		}()
 	}
 
+	// 可选：明文 HTTP DoH（反向代理用），独立于 cmux 之外
+	plainDoH = startPlaintextDoH(handler, dohHTTPAddr, &wg, errCh)
+
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -383,11 +393,8 @@ func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFi
 		if certDone != nil {
 			close(certDone)
 		}
-		if dohServer != nil {
-			if err := dohServer.Shutdown(shutdownCtx); err != nil && err != http.ErrServerClosed {
-				logrus.Warnf("shutdown doh server failed: %+v", err)
-			}
-		}
+		shutdownHTTPServer(dohServer, "doh (https)")
+		shutdownHTTPServer(plainDoH, "doh-http")
 		if udpServer != nil {
 			if err := shutdownDNSServer(shutdownCtx, udpServer); err != nil && !isServerClosed(err) {
 				logrus.Warnf("shutdown udp server failed: %+v", err)
@@ -418,6 +425,45 @@ func runDoH(ctx context.Context, handler inbound.IHandler, addr, network, certFi
 	}
 	logrus.Infof("ts-dns exited")
 	return nil
+}
+
+// startPlaintextDoH 启动明文 HTTP DoH 服务（供反向代理使用）。
+// 该地址应仅绑 loopback（如 127.0.0.1:53053），由受信任的反向代理转发。
+// addr 为空时返回 nil（不启动）。
+func startPlaintextDoH(handler inbound.IHandler, addr string, wg *sync.WaitGroup, errCh chan error) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		errCh <- fmt.Errorf("listen on %s/dns-query (http) failed: %w", addr, err)
+		return nil
+	}
+	srv := &http.Server{
+		Handler:     inbound.NewDohHandler(handler, true),
+		ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logrus.Infof("listen on %s/dns-query (http, for reverse proxy)", addr)
+		if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("doh-http service stopped: %w", err)
+		}
+	}()
+	return srv
+}
+
+
+func shutdownHTTPServer(srv *http.Server, name string) {
+	if srv == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil && err != http.ErrServerClosed {
+		logrus.Warnf("shutdown %s failed: %v", name, err)
+	}
 }
 
 func isServerClosed(err error) bool {

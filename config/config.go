@@ -15,6 +15,12 @@ type Conf struct {
 	QueryTimeout int    `toml:"query_timeout"` // 全局查询超时（秒）
 	SSLCertFile  string `toml:"ssl_cert_file"`
 	SSLKeyFile   string `toml:"ssl_key_file"`
+
+	// 明文 HTTP DoH 端口（可选）。仅填端口号，ts-dns 固定绑 127.0.0.1:<端口>，
+	// 供本机反向代理（如 nginx）终止 TLS 后转发 /dns-query 使用；ts-dns 通过
+	// X-Forwarded-For / X-Forwarded-Proto 还原真实客户端地址与协议。
+	// 留空(0)则不开启；主 listen 仍按原方式同时提供 udp/tcp/(https)doh。
+	ListenDoHHTTP int `toml:"listen_doh_http"`
 }
 
 // GlobalConf 兼容旧配置文件中的 global section
