@@ -128,14 +128,27 @@ func BuildGroups(globalConf config.Conf) (map[string]IGroup, error) {
 			g.withECS = ecs
 		}
 
-		g.hijack = make([]string, 0, len(conf.Hijack))
+		g.hijackRules = make([]hijackRule, 0, len(conf.Hijack))
 		for _, rule := range conf.Hijack {
 			parts := strings.Split(rule, "/")
 			if len(parts) != 4 || parts[0] != "" || parts[3] != "" {
 				logrus.Warnf("group %s: invalid hijack rule %q, expected format /source/dest/", name, rule)
 				continue
 			}
-			g.hijack = append(g.hijack, rule)
+			source, dest := parts[1], parts[2]
+			if source == "" || dest == "" {
+				logrus.Warnf("group %s: invalid hijack rule %q, source/dest must not be empty", name, rule)
+				continue
+			}
+			// 要求 source/dest 均为合法多级域名，避免 /com/x/ 这类误伤所有 .com 域名的规则
+			if !strings.Contains(source, ".") || !strings.Contains(dest, ".") {
+				logrus.Warnf("group %s: invalid hijack rule %q, source/dest must be a valid domain", name, rule)
+				continue
+			}
+			g.hijackRules = append(g.hijackRules, hijackRule{
+				source: dns.Fqdn(source),
+				dest:   dns.Fqdn(dest),
+			})
 		}
 
 		// proxy
@@ -238,6 +251,13 @@ type ipSetTask struct {
 	target  iIPSet
 }
 
+// hijackRule 预解析后的 hijack 规则，source/dest 已做 FQDN 归一化，
+// 避免每次请求/响应都重复 split + Fqdn。
+type hijackRule struct {
+	source string
+	dest   string
+}
+
 type groupImpl struct {
 	name     string
 	fallback bool
@@ -252,8 +272,8 @@ type groupImpl struct {
 	noCookie bool              // 是否删除请求中的cookie
 	withECS  *dns.EDNS0_SUBNET // 是否在请求中附加ECS信息
 
-	proxy  proxy.Dialer
-	hijack []string
+	proxy       proxy.Dialer
+	hijackRules []hijackRule
 
 	fastestIP   bool // 是否对响应中的IP地址进行测速，找出ping值最低的IP地址
 	tcpPingPort int  // 是否使用tcp ping
@@ -309,22 +329,82 @@ func (g *groupImpl) Match(req *dns.Msg) bool {
 }
 
 func (g *groupImpl) processHijackRules(msg *dns.Msg, reverse bool) {
-	if msg == nil {
+	if msg == nil || len(g.hijackRules) == 0 {
 		return
 	}
-
-	for _, rule := range g.hijack {
-		parts := strings.Split(rule, "/")
-		source := parts[1]
-		dest := parts[2]
-
+	rewrite := func(name string, r hijackRule) string {
+		if reverse {
+			return replaceDomainSuffix(name, r.dest, r.source)
+		}
+		return replaceDomainSuffix(name, r.source, r.dest)
+	}
+	if reverse {
 		for i := range msg.Question {
-			if !reverse {
-				msg.Question[i].Name = replaceDomainSuffix(msg.Question[i].Name, source, dest)
-			} else {
-				msg.Question[i].Name = replaceDomainSuffix(msg.Question[i].Name, dest, source)
+			orig := msg.Question[i].Name
+			// 倒序回退，保证链式规则（/A/B/ + /B/C/）能正确还原
+			for j := len(g.hijackRules) - 1; j >= 0; j-- {
+				msg.Question[i].Name = rewrite(msg.Question[i].Name, g.hijackRules[j])
+			}
+			if msg.Question[i].Name != orig {
+				logrus.Debugf("group %s hijack response question: %s -> %s", g.name, orig, msg.Question[i].Name)
 			}
 		}
+		// 净化 Answer：丢弃 CNAME 链，只保留与请求类型匹配的 A/AAAA 并重写 owner
+		cleanHijackAnswer(msg)
+		return
+	}
+	for i := range msg.Question {
+		orig := msg.Question[i].Name
+		for _, r := range g.hijackRules {
+			msg.Question[i].Name = rewrite(msg.Question[i].Name, r)
+		}
+		if msg.Question[i].Name != orig {
+			logrus.Debugf("group %s hijack request question: %s -> %s", g.name, orig, msg.Question[i].Name)
+		}
+	}
+}
+
+// cleanHijackAnswer 净化 hijack 响应：丢弃 Answer 区的 CNAME 链，仅保留与请求类型
+// 匹配的 A/AAAA 记录，并将其 owner 统一改写为原始 qname。这样响应不再泄漏被劫持
+// 域名，客户端也不会沿 CNAME 绕回污染查询。
+func cleanHijackAnswer(msg *dns.Msg) {
+	if msg == nil || len(msg.Question) != 1 {
+		return
+	}
+	q := msg.Question[0]
+	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
+		return
+	}
+	// 客户端启用 DNSSEC(DO) 时保持原样，不净化
+	if opt := msg.IsEdns0(); opt != nil && opt.Do() {
+		return
+	}
+	cleaned := make([]dns.RR, 0, len(msg.Answer))
+	for _, rr := range msg.Answer {
+		switch v := rr.(type) {
+		case *dns.A:
+			if q.Qtype == dns.TypeA {
+				v.Header().Name = q.Name
+				cleaned = append(cleaned, v)
+			}
+		case *dns.AAAA:
+			if q.Qtype == dns.TypeAAAA {
+				v.Header().Name = q.Name
+				cleaned = append(cleaned, v)
+			}
+		}
+	}
+	// 上游只回 CNAME 未带 A/AAAA 时，保留原响应，避免把正常响应变空
+	if len(cleaned) == 0 {
+		return
+	}
+	msg.Answer = cleaned
+	msg.Ns = nil
+	// 保留 EDNS OPT 记录，避免客户端因响应丢失 OPT 而异常
+	opt := msg.IsEdns0()
+	msg.Extra = nil
+	if opt != nil {
+		msg.Extra = []dns.RR{opt}
 	}
 }
 
@@ -360,15 +440,13 @@ func (g *groupImpl) Handle(ctx context.Context, req *dns.Msg) *HandleResult {
 			return nil // disabled
 		}
 	}
-	// 预处理请求
-	if g.noCookie || g.withECS != nil {
-		req = req.Copy()
-		if g.noCookie {
-			utils.RemoveEDNSCookie(req)
-		}
-		if g.withECS != nil {
-			utils.SetDefaultECS(req, g.withECS)
-		}
+	// 拷贝请求再处理，避免 hijack 等改写污染调用方传入的 req
+	req = req.Copy()
+	if g.noCookie {
+		utils.RemoveEDNSCookie(req)
+	}
+	if g.withECS != nil {
+		utils.SetDefaultECS(req, g.withECS)
 	}
 
 	g.processHijackRules(req, false)

@@ -149,6 +149,148 @@ func TestReplaceDomainSuffix(t *testing.T) {
 	}
 }
 
+func TestBuildGroups_HijackValidation(t *testing.T) {
+	groups, err := BuildGroups(config.Conf{Groups: map[string]config.Group{
+		"g1": {
+			DNS: []string{"1.1.1.1"},
+			Hijack: []string{
+				"/a.com/b.com/",   // ok
+				"invalid",         // 格式错误
+				"//b.com/",        // source 为空
+				"/a.com//",        // dest 为空
+				"/single/x.com/",  // source 单级域名
+				"/a.com/single/",  // dest 单级域名
+			},
+		},
+	}})
+	assert.Nil(t, err)
+	g, ok := groups["g1"].(*groupImpl)
+	if assert.True(t, ok) {
+		assert.Len(t, g.hijackRules, 1)
+		assert.Equal(t, "a.com.", g.hijackRules[0].source)
+		assert.Equal(t, "b.com.", g.hijackRules[0].dest)
+	}
+}
+
+func TestProcessHijackRules_ForwardAndReverse(t *testing.T) {
+	group := &groupImpl{name: "test", hijackRules: []hijackRule{
+		{source: "a.com.", dest: "b.com."},
+	}}
+	req := &dns.Msg{Question: []dns.Question{{Name: "www.a.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}}
+	group.processHijackRules(req, false)
+	assert.Equal(t, "www.b.com.", req.Question[0].Name)
+
+	group.processHijackRules(req, true)
+	assert.Equal(t, "www.a.com.", req.Question[0].Name)
+}
+
+func TestProcessHijackRules_ChainReverse(t *testing.T) {
+	// 链式规则 /A/B/ + /B/C/：正向 A->C，反向倒序回退 C->A
+	group := &groupImpl{name: "test", hijackRules: []hijackRule{
+		{source: "a.com.", dest: "b.com."},
+		{source: "b.com.", dest: "c.com."},
+	}}
+	req := &dns.Msg{Question: []dns.Question{{Name: "www.a.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}}
+	group.processHijackRules(req, false)
+	assert.Equal(t, "www.c.com.", req.Question[0].Name)
+
+	group.processHijackRules(req, true)
+	assert.Equal(t, "www.a.com.", req.Question[0].Name)
+}
+
+func TestCleanHijackAnswer(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "proxy.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	cname1, _ := dns.NewRR("www.shopify.com. 60 IN CNAME shops.myshopify.com.")
+	cname2, _ := dns.NewRR("shops.myshopify.com. 60 IN CNAME shops.myshopify.cdn.cloudflare.net.")
+	a, _ := dns.NewRR("shops.myshopify.cdn.cloudflare.net. 60 IN A 104.18.2.10")
+	ns, _ := dns.NewRR("shopify.com. 60 IN NS ns1.shopify.com.")
+	extraA, _ := dns.NewRR("ns1.shopify.com. 60 IN A 1.1.1.1")
+	msg.Answer = []dns.RR{cname1, cname2, a}
+	msg.Ns = []dns.RR{ns}
+	msg.Extra = []dns.RR{extraA}
+
+	cleanHijackAnswer(msg)
+
+	assert.Len(t, msg.Answer, 1)
+	if aa, ok := msg.Answer[0].(*dns.A); assert.True(t, ok) {
+		assert.Equal(t, "proxy.test.", aa.Header().Name)
+		assert.Equal(t, "104.18.2.10", aa.A.String())
+	}
+	assert.Empty(t, msg.Ns)
+	assert.Empty(t, msg.Extra)
+}
+
+func TestCleanHijackAnswer_FiltersByQtype(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "proxy.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	a, _ := dns.NewRR("x.test. 60 IN A 1.1.1.1")
+	aaaa, _ := dns.NewRR("x.test. 60 IN AAAA ff80::1")
+	msg.Answer = []dns.RR{a, aaaa}
+
+	cleanHijackAnswer(msg)
+
+	assert.Len(t, msg.Answer, 1)
+	_, ok := msg.Answer[0].(*dns.AAAA)
+	assert.True(t, ok)
+}
+
+func TestCleanHijackAnswer_Guards(t *testing.T) {
+	cname, _ := dns.NewRR("a.test. 60 IN CNAME b.test.")
+
+	// 多问题请求不净化
+	msg := new(dns.Msg)
+	msg.Question = []dns.Question{
+		{Name: "a.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+		{Name: "b.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+	}
+	msg.Answer = []dns.RR{cname}
+	cleanHijackAnswer(msg)
+	assert.Len(t, msg.Answer, 1)
+
+	// 非 A/AAAA 查询不净化
+	msg = new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "a.test.", Qtype: dns.TypeCNAME, Qclass: dns.ClassINET}}
+	msg.Answer = []dns.RR{cname}
+	cleanHijackAnswer(msg)
+	assert.Len(t, msg.Answer, 1)
+
+	// DNSSEC(DO) 请求不净化
+	msg = new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "a.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	opt := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	opt.SetDo(true)
+	msg.Extra = []dns.RR{opt}
+	msg.Answer = []dns.RR{cname}
+	cleanHijackAnswer(msg)
+	assert.Len(t, msg.Answer, 1)
+
+	// 只有 CNAME 无 A/AAAA 时保留原响应（不回退成空答案）
+	msg = new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "a.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	msg.Answer = []dns.RR{cname}
+	cleanHijackAnswer(msg)
+	assert.Len(t, msg.Answer, 1)
+}
+
+func TestCleanHijackAnswer_KeepsOPT(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.Question = []dns.Question{{Name: "a.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	opt := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	msg.Extra = []dns.RR{opt}
+	extraA, _ := dns.NewRR("ns.test. 60 IN A 1.1.1.1")
+	msg.Extra = append(msg.Extra, extraA)
+	a, _ := dns.NewRR("x.test. 60 IN A 2.2.2.2")
+	msg.Answer = []dns.RR{a}
+
+	cleanHijackAnswer(msg)
+
+	assert.Len(t, msg.Extra, 1)
+	if assert.NotEmpty(t, msg.Extra) {
+		assert.Equal(t, dns.TypeOPT, msg.Extra[0].Header().Rrtype)
+	}
+}
+
 func TestParseDurationDayOverflow(t *testing.T) {
 	d, err := parseDuration("2d")
 	assert.Nil(t, err)
