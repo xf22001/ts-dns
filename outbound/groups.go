@@ -394,8 +394,15 @@ func cleanHijackAnswer(msg *dns.Msg) {
 			}
 		}
 	}
-	// 上游只回 CNAME 未带 A/AAAA 时，保留原响应，避免把正常响应变空
+	// 上游只回 CNAME 未带 A/AAAA 时，应当返回空 Answer（NODATA），防止泄露 CNAME 链并导致协议畸形
 	if len(cleaned) == 0 {
+		msg.Answer = nil
+		msg.Ns = nil
+		opt := msg.IsEdns0()
+		msg.Extra = nil
+		if opt != nil {
+			msg.Extra = []dns.RR{opt}
+		}
 		return
 	}
 	msg.Answer = cleaned

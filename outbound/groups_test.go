@@ -265,12 +265,12 @@ func TestCleanHijackAnswer_Guards(t *testing.T) {
 	cleanHijackAnswer(msg)
 	assert.Len(t, msg.Answer, 1)
 
-	// 只有 CNAME 无 A/AAAA 时保留原响应（不回退成空答案）
+	// 只有 CNAME 无 A/AAAA 时，应当返回空答案（NODATA），防止泄露 CNAME 链并导致协议畸形
 	msg = new(dns.Msg)
 	msg.Question = []dns.Question{{Name: "a.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
 	msg.Answer = []dns.RR{cname}
 	cleanHijackAnswer(msg)
-	assert.Len(t, msg.Answer, 1)
+	assert.Len(t, msg.Answer, 0)
 }
 
 func TestCleanHijackAnswer_KeepsOPT(t *testing.T) {
