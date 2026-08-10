@@ -1,72 +1,72 @@
 package config
 
 type Conf struct {
-	HostsFiles []string          `toml:"hosts_files"`
-	Hosts      map[string]string `toml:"hosts"`
-	Cache      CacheConf         `toml:"cache"`
-	Global     GlobalConf        `toml:"global"`
+	HostsFiles []string          `yaml:"hosts_files"`
+	Hosts      map[string]string `yaml:"hosts"`
+	Cache      CacheConf         `yaml:"cache"`
+	Global     GlobalConf        `yaml:"global"`
 
-	Groups        map[string]Group          `toml:"groups"`
-	DisableIPv6   bool                      `toml:"disable_ipv6"`
-	DisableQTypes []string                  `toml:"disable_qtypes"`
-	Redirectors   map[string]RedirectorConf `toml:"redirectors"`
+	Groups        map[string]Group          `yaml:"groups"`
+	DisableIPv6   bool                      `yaml:"disable_ipv6"`
+	DisableQTypes []string                  `yaml:"disable_qtypes"`
+	Redirectors   map[string]RedirectorConf `yaml:"redirectors"`
 
-	Listen       string `toml:"listen"`
-	QueryTimeout int    `toml:"query_timeout"` // 全局查询超时（秒）
-	SSLCertFile  string `toml:"ssl_cert_file"`
-	SSLKeyFile   string `toml:"ssl_key_file"`
+	Listen       string `yaml:"listen"`
+	QueryTimeout int    `yaml:"query_timeout"` // 全局查询超时（秒）
+	SSLCertFile  string `yaml:"ssl_cert_file"`
+	SSLKeyFile   string `yaml:"ssl_key_file"`
 
 	// 明文 HTTP DoH 端口（可选）。仅填端口号，ts-dns 固定绑 127.0.0.1:<端口>，
 	// 供本机反向代理（如 nginx）终止 TLS 后转发 /dns-query 使用；ts-dns 通过
 	// X-Forwarded-For / X-Forwarded-Proto 还原真实客户端地址与协议。
 	// 留空(0)则不开启；主 listen 仍按原方式同时提供 udp/tcp/(https)doh。
-	ListenDoHHTTP int `toml:"listen_doh_http"`
+	ListenDoHHTTP int `yaml:"listen_doh_http"`
 }
 
 // GlobalConf 兼容旧配置文件中的 global section
 type GlobalConf struct {
-	HTTPTimeout int `toml:"http_timeout"`
-	Timeout     int `toml:"timeout"`
+	HTTPTimeout int `yaml:"http_timeout"`
+	Timeout     int `yaml:"timeout"`
 }
 
 // CacheConf 配置文件中cache section对应的结构
 type CacheConf struct {
-	Size   int `toml:"size"`
-	MinTTL int `toml:"min_ttl"`
-	MaxTTL int `toml:"max_ttl"`
+	Size   int `yaml:"size"`
+	MinTTL int `yaml:"min_ttl"`
+	MaxTTL int `yaml:"max_ttl"`
 }
 
 // Group 配置文件中每个groups section对应的结构
 type Group struct {
-	DisableIPv6   bool     `toml:"disable_ipv6"`
-	DisableQTypes []string `toml:"disable_qtypes"`
-	ECS           string   `toml:"ecs"`
-	NoCookie      bool     `toml:"no_cookie"`
+	DisableIPv6   bool     `yaml:"disable_ipv6"`
+	DisableQTypes []string `yaml:"disable_qtypes"`
+	ECS           string   `yaml:"ecs"`
+	NoCookie      bool     `yaml:"no_cookie"`
 
-	Rules         []string `toml:"rules"`
-	RulesFile     string   `toml:"rules_file"`
-	GFWListFile   string   `toml:"gfwlist_file"`
-	GFWListURL    string   `toml:"gfwlist_url"`
-	GFWListUpdate string   `toml:"gfwlist_update"` // gfwlist_url 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
-	Fallback      bool     `toml:"fallback"`
+	Rules         []string `yaml:"rules"`
+	RulesFile     string   `yaml:"rules_file"`
+	GFWListFile   string   `yaml:"gfwlist_file"`
+	GFWListURL    string   `yaml:"gfwlist_url"`
+	GFWListUpdate string   `yaml:"gfwlist_update"` // gfwlist_url 更新周期，支持 m/h/d（如 30m、1h、2d），默认 1h
+	Fallback      bool     `yaml:"fallback"`
 
-	Socks5 string `toml:"socks5"`
+	Socks5 string `yaml:"socks5"`
 
-	DNS    []string `toml:"dns"`
-	DoT    []string `toml:"dot"`
-	DoH    []string `toml:"doh"`
-	Hijack []string `toml:"hijack"`
+	DNS    []string `yaml:"dns"`
+	DoT    []string `yaml:"dot"`
+	DoH    []string `yaml:"doh"`
+	Hijack []string `yaml:"hijack"`
 
-	FastestIP           bool `toml:"fastest_ip"`
-	TCPPingPort         int  `toml:"tcp_ping_port"`
-	FastestPingTimeoutMs int  `toml:"fastest_ping_timeout_ms"`
-	FastestPingMaxIPs    int  `toml:"fastest_ping_max_ips"`
+	FastestIP           bool `yaml:"fastest_ip"`
+	TCPPingPort         int  `yaml:"tcp_ping_port"`
+	FastestPingTimeoutMs int  `yaml:"fastest_ping_timeout_ms"`
+	FastestPingMaxIPs    int  `yaml:"fastest_ping_max_ips"`
 
-	IPSet    string `toml:"ipset"`
-	IPSet6   string `toml:"ipset6"`
-	IPSetTTL int    `toml:"ipset_ttl"`
+	IPSet    string `yaml:"ipset"`
+	IPSet6   string `yaml:"ipset6"`
+	IPSetTTL int    `yaml:"ipset_ttl"`
 
-	Redirector string `toml:"redirector"`
+	Redirector string `yaml:"redirector"`
 }
 
 func (g Group) IsSetGFWList() bool {
@@ -79,8 +79,8 @@ func (g Group) IsEmptyRule() bool {
 
 // RedirectorConf 重定向器配置
 type RedirectorConf struct {
-	Type      string   `toml:"type"`
-	Rules     []string `toml:"rules"`
-	RulesFile string   `toml:"rules_file"`
-	DstGroup  string   `toml:"dst_group"`
+	Type      string   `yaml:"type"`
+	Rules     []string `yaml:"rules"`
+	RulesFile string   `yaml:"rules_file"`
+	DstGroup  string   `yaml:"dst_group"`
 }

@@ -30,81 +30,94 @@
 ## 使用说明
 
 1. 在[Releases页面](https://github.com/wolf-joe/ts-dns/releases)下载对应系统和平台的压缩包；
-2. 解压后按需求编辑配置文件`ts-dns.toml`（可选）并运行进程：
+2. 解压后按需求编辑配置文件`ts-dns.yaml`（可选）并运行进程：
   ```shell
   # ./ts-dns -h  # 显示命令行帮助信息
-  # ./ts-dns -c ts-dns.toml  # 指定配置文件名
+  # ./ts-dns -c ts-dns.yaml  # 指定配置文件名
   ./ts-dns
   kill -SIGHUP <PID> # 重载配置文件
   ```
 
 ## 配置示例
 
-> 完整配置文件参见`ts-dns.full.toml`
+> 完整配置文件参见`ts-dns-full.yaml`
 
-1. 默认配置（`ts-dns.toml`），开箱即用
-  ```toml
-  listen = ":53"
+1. 默认配置（`ts-dns.yaml`），开箱即用
+  ```yaml
+  listen: ":53"
 
-  [groups]
-    [groups.clean]
-    dns = ["223.5.5.5", "114.114.114.114"]
+  groups:
+    clean:
+      dns:
+        - "223.5.5.5"
+        - "114.114.114.114"
 
-    [groups.dirty]
-    dns = [""] # 省略
-    gfwlist_file = "gfwlist.txt"
+    dirty:
+      dns:
+        - "" # 省略
+      gfwlist_file: "gfwlist.txt"
   ```
 
 2. 选择ping值最低的IP地址（启用时建议以root权限运行本程序）
-  ```toml
+  ```yaml
   # ...
-  [groups.clean]
-    dns = ["223.5.5.5", "114.114.114.114"]
-    fastest_ip = true
+  groups:
+    clean:
+      dns:
+        - "223.5.5.5"
+        - "114.114.114.114"
+      fastest_ip: true
   # ...
   ```
 
 3. 指定hosts文件和自定义hosts
-  ```toml
+  ```yaml
   # ...
-  hosts_files = ["adaway.txt"]
-  [hosts]
-  "www.example.com" = "1.1.1.1"
+  hosts_files:
+    - "adaway.txt"
+  hosts:
+    "www.example.com": "1.1.1.1"
   # ...
   ```
 
 4. 使用socks5代理转发DNS请求
-  ```toml
+  ```yaml
   # ...
-    [groups.dirty]
-    socks5 = "127.0.0.1:1080"
-    # ...
+  groups:
+    dirty:
+      socks5: "127.0.0.1:1080"
+      # ...
   ```
 
 5. 转发至上游DNS时默认附带指定ECS信息（暂不支持DOH）
-  ```toml
+  ```yaml
   # ...
-    [groups.clean]
-    ecs = "1.2.4.0/24"
-    # ...
+  groups:
+    clean:
+      ecs: "1.2.4.0/24"
+      # ...
   ```
 
 6. 自定义域名分组
-  ```toml
+  ```yaml
   # ...
-    [groups.work]
-    dns = ["10.1.1.1"]
-    rules = ["company.com"]
-    # ...
+  groups:
+    work:
+      dns:
+        - "10.1.1.1"
+      rules:
+        - "company.com"
+      # ...
   ```
 
-7. 动态添加IPSet记录（使用前请阅读`ts-dns.full.toml`对应说明）
-  ```toml
+7. 动态添加IPSet记录（使用前请阅读`ts-dns-full.yaml`对应说明）
+  ```yaml
   # ...
-    [groups.dirty]
-    ipset = "blocked"
-    ipset_ttl = 86400
-    # ...
+  groups:
+    dirty:
+      ipset: "blocked"
+      ipset_ttl: 86400
+      # ...
   ```
 
 

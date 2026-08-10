@@ -71,7 +71,7 @@ archives:
     files:
       - README*.md
       - LICENSE
-      - ts-dns*.toml
+      - ts-dns*.yaml
       - gfwlist.txt
       - cnip.txt
 snapshot:

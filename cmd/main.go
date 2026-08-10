@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
 	"github.com/soheilhy/cmux"
@@ -41,7 +41,7 @@ func main() {
 	// 读取命令行参数
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
-	filename := flag.String("c", "ts-dns.toml", "config file path")
+	filename := flag.String("c", "ts-dns.yaml", "config file path")
 	listen := flag.String("listen", "", "listen address/port/protocol")
 	showVer := flag.Bool("v", false, "show version and exit")
 	debugMode := flag.Bool("vv", false, "show debug log")
@@ -76,14 +76,20 @@ func main() {
 	}
 	// 读取配置文件
 	conf := config.Conf{}
-	if _, err := toml.DecodeFile(*filename, &conf); err != nil {
+	yamlBytes, err := os.ReadFile(*filename)
+	if err != nil {
+		logrus.Errorf("read config file %q failed: %+v", *filename, err)
+		exitCode = 1
+		return
+	}
+	if err := yaml.Unmarshal(yamlBytes, &conf); err != nil {
 		logrus.Errorf("load config file %q failed: %+v", *filename, err)
 		exitCode = 1
 		return
 	}
 	normalizeConf(&conf)
 	buf := bytes.NewBuffer(nil)
-	_ = toml.NewEncoder(buf).Encode(conf)
+	_ = yaml.NewEncoder(buf).Encode(conf)
 	logrus.Debugf("load config success: %s", buf)
 	// 解析监听地址
 	if *listen == "" {
@@ -513,13 +519,18 @@ func reloadConf(ctx context.Context, ch chan os.Signal, filename *string, handle
 		case <-ch:
 		}
 		conf := config.Conf{}
-		if _, err := toml.DecodeFile(*filename, &conf); err != nil {
+		yamlBytes, err := os.ReadFile(*filename)
+		if err != nil {
+			logrus.Warnf("read config file %q failed: %+v", *filename, err)
+			continue
+		}
+		if err := yaml.Unmarshal(yamlBytes, &conf); err != nil {
 			logrus.Warnf("load config file %q failed: %+v", *filename, err)
 			continue
 		}
 		normalizeConf(&conf)
 		buf := bytes.NewBuffer(nil)
-		_ = toml.NewEncoder(buf).Encode(conf)
+		_ = yaml.NewEncoder(buf).Encode(conf)
 		logrus.Debugf("reload config: %s", buf)
 		if err := handler.ReloadConfig(conf); err != nil {
 			logrus.Warnf("reload config failed: %+v", err)
