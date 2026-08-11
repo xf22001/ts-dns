@@ -772,7 +772,11 @@ func (g *groupImpl) grabGFWList(ctx context.Context) []byte {
 		}
 		client.Transport = &http.Transport{DialContext: wrap}
 	}
-	req, _ := http.NewRequestWithContext(ctx, "GET", g.gfwListURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", g.gfwListURL, nil)
+	if err != nil {
+		logrus.Warnf("build gfw list request %q failed: %+v", g.gfwListURL, err)
+		return nil
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logrus.Warnf("get gfw list %q failed: %+v", g.gfwListURL, err)

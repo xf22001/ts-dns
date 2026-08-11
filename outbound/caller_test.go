@@ -121,6 +121,46 @@ func TestDoHCallerV2(t *testing.T) {
 
 	url := "https://dns.alidns.com/dns-query"
 
+	t.Run("ip literal creates client without resolver", func(t *testing.T) {
+		caller, err := NewDoHCallerV2("https://1.1.1.1/dns-query", nil)
+		assert.Nil(t, err)
+		if assert.NotNil(t, caller) {
+			assert.Equal(t, "1.1.1.1", caller.host)
+			assert.Equal(t, "443", caller.port)
+			assert.Len(t, caller.clients, 1)
+			caller.Exit()
+		}
+
+		caller, err = NewDoHCallerV2("https://[2606:4700:4700::1111]/dns-query", nil)
+		assert.Nil(t, err)
+		if assert.NotNil(t, caller) {
+			assert.Equal(t, "2606:4700:4700::1111", caller.host)
+			assert.Equal(t, "443", caller.port)
+			assert.Len(t, caller.clients, 1)
+			caller.Exit()
+		}
+	})
+
+	t.Run("domain resolver uses a and aaaa answers", func(t *testing.T) {
+		resolver := wrapperHandler(func(req *dns.Msg) *dns.Msg {
+			switch req.Question[0].Qtype {
+			case dns.TypeA:
+				return &dns.Msg{Answer: []dns.RR{&dns.A{A: net.IPv4(223, 5, 5, 5)}}}
+			case dns.TypeAAAA:
+				return &dns.Msg{Answer: []dns.RR{&dns.AAAA{AAAA: net.ParseIP("2606:4700:4700::1111")}}}
+			}
+			return nil
+		})
+		caller, err := NewDoHCallerV2(url, nil)
+		assert.Nil(t, err)
+		if assert.NotNil(t, caller) {
+			caller.SetResolver(resolver)
+			caller.resolve(nil, time.Second)
+			assert.Len(t, caller.clients, 2)
+			caller.Exit()
+		}
+	})
+
 	// 测试run和stop
 	caller, err := NewDoHCallerV2(url, nil)
 	caller.Start(nil)

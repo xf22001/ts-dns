@@ -57,8 +57,8 @@ type Group struct {
 	DoH    []string `yaml:"doh"`
 	Hijack []string `yaml:"hijack"`
 
-	FastestIP           bool `yaml:"fastest_ip"`
-	TCPPingPort         int  `yaml:"tcp_ping_port"`
+	FastestIP            bool `yaml:"fastest_ip"`
+	TCPPingPort          int  `yaml:"tcp_ping_port"`
 	FastestPingTimeoutMs int  `yaml:"fastest_ping_timeout_ms"`
 	FastestPingMaxIPs    int  `yaml:"fastest_ping_max_ips"`
 

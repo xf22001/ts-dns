@@ -38,8 +38,8 @@ func TestBuildGroups(t *testing.T) {
 			"g1": {
 				DNS:                  []string{"1.1.1.1"},
 				FastestIP:            true,
-				FastestPingTimeoutMs:  321,
-				FastestPingMaxIPs:     7,
+				FastestPingTimeoutMs: 321,
+				FastestPingMaxIPs:    7,
 			},
 		}})
 		assert.Nil(t, err)
@@ -154,12 +154,12 @@ func TestBuildGroups_HijackValidation(t *testing.T) {
 		"g1": {
 			DNS: []string{"1.1.1.1"},
 			Hijack: []string{
-				"/a.com/b.com/",   // ok
-				"invalid",         // 格式错误
-				"//b.com/",        // source 为空
-				"/a.com//",        // dest 为空
-				"/single/x.com/",  // source 单级域名
-				"/a.com/single/",  // dest 单级域名
+				"/a.com/b.com/",  // ok
+				"invalid",        // 格式错误
+				"//b.com/",       // source 为空
+				"/a.com//",       // dest 为空
+				"/single/x.com/", // source 单级域名
+				"/a.com/single/", // dest 单级域名
 			},
 		},
 	}})
@@ -299,6 +299,11 @@ func TestParseDurationDayOverflow(t *testing.T) {
 	_, err = parseDuration("110000d")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "overflows")
+}
+
+func TestGrabGFWListInvalidURL(t *testing.T) {
+	group := &groupImpl{gfwListURL: "://bad-url"}
+	assert.Nil(t, group.grabGFWList(context.Background()))
 }
 
 func TestGroupFastestRespHonorsContext(t *testing.T) {

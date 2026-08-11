@@ -160,6 +160,25 @@ type DoHCallerV2 struct {
 	startOnce sync.Once
 }
 
+func (caller *DoHCallerV2) newClient(dialHost string) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DisableKeepAlives:   false,
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConnsPerHost: 4,
+		MaxConnsPerHost:     100,
+		DialContext: func(ctx context.Context, network, _ string) (conn net.Conn, err error) {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			addr := net.JoinHostPort(dialHost, caller.port)
+			if contextDialer, ok := caller.dialer.(proxy.ContextDialer); ok {
+				return contextDialer.DialContext(ctx, network, addr)
+			}
+			return caller.dialer.Dial(network, addr)
+		},
+	}}
+}
+
 func (caller *DoHCallerV2) Start(resolver dns.Handler) {
 	caller.resolver = resolver
 	caller.startOnce.Do(func() {
@@ -192,62 +211,63 @@ func (caller *DoHCallerV2) run(resolveCycle time.Duration, timeout time.Duration
 	}
 }
 
-// 使用resolver，将host解析成ipv4并生成clients
+// 使用resolver，将host解析成ip并生成clients
 func (caller *DoHCallerV2) resolve(srcReq *dns.Msg, timeout time.Duration) {
-	genClient := func(ip string) *http.Client {
-		return &http.Client{Transport: &http.Transport{
-			DisableKeepAlives:   false,
-			IdleConnTimeout:     30 * time.Second,
-			MaxIdleConnsPerHost: 4,
-			MaxConnsPerHost:     100,
-			DialContext: func(ctx context.Context, network, _ string) (conn net.Conn, err error) {
-				if ctx == nil {
-					ctx = context.Background()
-				}
-				addr := ip + ":" + caller.port // 重写addr
-				if contextDialer, ok := caller.dialer.(proxy.ContextDialer); ok {
-					return contextDialer.DialContext(ctx, network, addr)
-				}
-				return caller.dialer.Dial(network, addr)
-			},
-		}}
+	if ip := net.ParseIP(caller.host); ip != nil {
+		caller.rwMux.Lock()
+		caller.clients = []*http.Client{caller.newClient(ip.String())}
+		caller.rwMux.Unlock()
+		return
 	}
 	name := caller.host + "."
 	if srcReq != nil && len(srcReq.Question) > 0 && strings.EqualFold(srcReq.Question[0].Name, name) {
 		logrus.Errorf("%s resolve recursive", caller)
 		return // 可能是回环解析：DoHCaller想通过ts-dns解析自身域名，但ts-dns将请求转发回DoHCaller
 	}
-	// 模拟dns请求
-	resolveReq := &dns.Msg{
-		MsgHdr:   dns.MsgHdr{Id: 0xffff, RecursionDesired: true, AuthenticatedData: true},
-		Question: []dns.Question{{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}},
-	}
-	writer := utils.NewFakeRespWriter()
-	// 标记为非客户端请求（上游DoH域名的内部解析），不计入客户端查询日志
-	writer.SetInternal()
-	done := make(chan interface{}, 1)
-	go func() {
-		if caller.resolver != nil {
-			caller.resolver.ServeDNS(writer, resolveReq)
+	resolve := func(qType uint16, resultCh chan<- *dns.Msg) {
+		resolveReq := &dns.Msg{
+			MsgHdr:   dns.MsgHdr{Id: 0xffff, RecursionDesired: true, AuthenticatedData: true},
+			Question: []dns.Question{{Name: name, Qtype: qType, Qclass: dns.ClassINET}},
 		}
-		done <- struct{}{}
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		return // 超时直接结束
+		writer := utils.NewFakeRespWriter()
+		// 标记为非客户端请求（上游DoH域名的内部解析），不计入客户端查询日志
+		writer.SetInternal()
+		done := make(chan interface{}, 1)
+		go func() {
+			if caller.resolver != nil {
+				caller.resolver.ServeDNS(writer, resolveReq)
+			}
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			resultCh <- writer.Msg
+		case <-time.After(timeout):
+			resultCh <- nil
+		}
 	}
-	// 解析响应中的ipv4地址
+
+	// 解析响应中的ipv4/ipv6地址
 	clients := make([]*http.Client, 0, 2)
 	ips := make([]string, 0, 2)
-	if writer.Msg != nil {
-		for _, rr := range writer.Msg.Answer {
+	qTypes := []uint16{dns.TypeA, dns.TypeAAAA}
+	resultCh := make(chan *dns.Msg, len(qTypes))
+	for _, qType := range qTypes {
+		go resolve(qType, resultCh)
+	}
+	for range qTypes {
+		msg := <-resultCh
+		if msg == nil {
+			continue
+		}
+		for _, rr := range msg.Answer {
 			switch resp := rr.(type) {
 			case *dns.A:
-				clients = append(clients, genClient(resp.A.String()))
+				clients = append(clients, caller.newClient(resp.A.String()))
 				ips = append(ips, resp.A.String())
+			case *dns.AAAA:
+				clients = append(clients, caller.newClient(resp.AAAA.String()))
+				ips = append(ips, resp.AAAA.String())
 			}
 		}
 	}
@@ -362,12 +382,19 @@ func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer) (*DoHCallerV2, erro
 		return nil, fmt.Errorf("rawURL should be abs url")
 	}
 	// 提取host、port
-	var host, port string
-	if i := strings.LastIndex(u.Host, ":"); i == -1 {
-		u.Host += ":443"
+	host, port := u.Hostname(), u.Port()
+	if host == "" {
+		return nil, fmt.Errorf("rawURL should have host")
 	}
-	if host, port, err = net.SplitHostPort(u.Host); err != nil {
-		return nil, err
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return nil, fmt.Errorf("rawURL host is invalid: %q", host)
+	}
+	if port == "" {
+		if u.Scheme == "http" {
+			port = "80"
+		} else {
+			port = "443"
+		}
 	}
 
 	// If no proxyDialer is provided, use a direct dialer
@@ -385,5 +412,8 @@ func NewDoHCallerV2(rawURL string, proxyDialer proxy.Dialer) (*DoHCallerV2, erro
 	caller.requireCh = make(chan *dns.Msg, 1)
 	caller.satisfyCh = make(chan interface{}, 1)
 	caller.cancelCh = make(chan struct{})
+	if ip := net.ParseIP(host); ip != nil {
+		caller.clients = []*http.Client{caller.newClient(ip.String())}
+	}
 	return caller, nil
 }

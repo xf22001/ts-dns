@@ -21,12 +21,12 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"github.com/miekg/dns"
 	"github.com/sirupsen/logrus"
 	"github.com/soheilhy/cmux"
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/inbound"
+	"gopkg.in/yaml.v3"
 )
 
 // VERSION 程序版本号
@@ -459,7 +459,6 @@ func startPlaintextDoH(handler inbound.IHandler, addr string, wg *sync.WaitGroup
 	}()
 	return srv
 }
-
 
 func shutdownHTTPServer(srv *http.Server, name string) {
 	if srv == nil {

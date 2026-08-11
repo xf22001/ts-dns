@@ -35,6 +35,18 @@ func TestPingIP(t *testing.T) {
 	assert.Nil(t, PingIP("1.1.1.1", 80, time.Second))
 }
 
+func TestPingIPTCPIPv6UsesHostPort(t *testing.T) {
+	mocker := mock.Mocker{}
+	defer mocker.Reset()
+	mocker.Method(&net.TCPConn{}, "Close", func(*net.TCPConn) error { return nil })
+	mocker.Func(net.DialTimeout, func(_, addr string, _ time.Duration) (net.Conn, error) {
+		assert.Equal(t, "[2606:4700:4700::1111]:443", addr)
+		return &net.TCPConn{}, nil
+	})
+
+	assert.Nil(t, PingIP("2606:4700:4700::1111", 443, time.Second))
+}
+
 func TestFastestPingIP(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
 	port, timeout := 80, 100*time.Millisecond

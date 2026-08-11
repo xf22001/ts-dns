@@ -14,7 +14,7 @@ import (
 
 // DohHandler is a http.Handler for DNS-over-HTTPS.
 type DohHandler struct {
-	handler       IHandler
+	handler        IHandler
 	trustForwarded bool // 是否信任反向代理注入的 X-Forwarded-* 头（明文 HTTP DoH 场景）
 }
 

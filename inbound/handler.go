@@ -18,8 +18,8 @@ import (
 	"github.com/wolf-joe/ts-dns/config"
 	"github.com/wolf-joe/ts-dns/hosts"
 	"github.com/wolf-joe/ts-dns/outbound"
-	"github.com/wolf-joe/ts-dns/utils"
 	"github.com/wolf-joe/ts-dns/redirector"
+	"github.com/wolf-joe/ts-dns/utils"
 )
 
 // region interface
@@ -192,7 +192,7 @@ func (h *handlerImpl) ServeDNS(writer dns.ResponseWriter, req *dns.Msg) {
 	if resp == nil {
 		resp = new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
-		}
+	}
 	if err := writer.WriteMsg(resp); err != nil {
 		logrus.Errorf("write msg failed: %v", err)
 	}

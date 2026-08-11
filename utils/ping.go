@@ -12,7 +12,7 @@ import (
 // PingIP 向指定ip地址发起icmp ping/tcp ping（如tcpPort大于0），返回值为nil代表ping成功
 func PingIP(ipAddr string, tcpPort int, timeout time.Duration) error {
 	if tcpPort > 0 { // tcp ping
-		addr := ipAddr + ":" + strconv.Itoa(tcpPort)
+		addr := net.JoinHostPort(ipAddr, strconv.Itoa(tcpPort))
 		conn, err := net.DialTimeout("tcp", addr, timeout)
 		if err != nil {
 			return err

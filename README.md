@@ -12,7 +12,7 @@
 ### 灵活解析
 * 支持按ABP风格规则/`GFWList`对DNS请求进行分组
 * 支持按CIDR对DNS请求进行重定向
-* 支持DNS over UDP/TCP/TLS/HTTPS、socks5代理、ECS
+* 支持DNS over UDP/TCP/TLS/HTTPS、socks5代理、ECS；DoH上游域名支持解析A/AAAA记录
 * 支持将查询结果中的IPv4地址添加至IPSet
 ### 快速解析
 * 支持并发请求上游DNS，选择最快响应
@@ -89,7 +89,19 @@
       # ...
   ```
 
-5. 转发至上游DNS时默认附带指定ECS信息（暂不支持DOH）
+5. 使用DoH上游（支持域名或IP地址，域名会同时解析A/AAAA记录）
+  ```yaml
+  # ...
+  groups:
+    dirty:
+      doh:
+        - "https://cloudflare-dns.com/dns-query"
+        - "https://1.1.1.1/dns-query"
+        - "https://[2606:4700:4700::1111]/dns-query"
+      # ...
+  ```
+
+6. 转发至上游DNS时默认附带指定ECS信息（暂不支持DOH）
   ```yaml
   # ...
   groups:
@@ -98,7 +110,7 @@
       # ...
   ```
 
-6. 自定义域名分组
+7. 自定义域名分组
   ```yaml
   # ...
   groups:
@@ -110,7 +122,7 @@
       # ...
   ```
 
-7. 动态添加IPSet记录（使用前请阅读`ts-dns-full.yaml`对应说明）
+8. 动态添加IPSet记录（使用前请阅读`ts-dns-full.yaml`对应说明）
   ```yaml
   # ...
   groups:

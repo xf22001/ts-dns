@@ -1,5 +1,7 @@
 # v1.0.0
 
+- [x] 优化DoH上游解析，支持域名A/AAAA、IPv4/IPv6 literal，并修复IPv6 TCP ping地址拼接
+- [x] 修复非法`gfwlist_url`可能导致进程崩溃的问题
 - [x] 从配置中移除`query_log`、`gfwlist`、`gfwlist_b64`项
 - [x] 移除针对`dirty`、`clean`组的特殊逻辑
 - [x] 支持为特定组指定`gfwlist`匹配策略、兜底匹配策略
