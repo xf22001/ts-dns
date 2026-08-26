@@ -70,13 +70,17 @@
   # ...
   ```
 
-3. 指定hosts文件和自定义hosts
+3. 指定hosts文件和自定义hosts（支持单IP、多IP列表及IPv4/IPv6双栈）
   ```yaml
   # ...
   hosts_files:
     - "adaway.txt"
   hosts:
     "www.example.com": "1.1.1.1"
+    "dual.example.com":
+      - "1.1.1.1"
+      - "2606:4700::1111"
+    "*.multi.example.com": ["1.1.1.1", "1.0.0.1"]
   # ...
   ```
 

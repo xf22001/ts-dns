@@ -1,10 +1,44 @@
 package config
 
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
+
+// StringSlice 支持 YAML 中解析单个字符串或字符串列表
+type StringSlice []string
+
+// UnmarshalYAML 自定义反序列化，兼容单个字符串与字符串数组
+func (s *StringSlice) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		*s = []string{value.Value}
+		return nil
+	}
+	if value.Kind == yaml.SequenceNode {
+		var list []string
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*s = list
+		return nil
+	}
+	return fmt.Errorf("line %d: cannot unmarshal %s into string slice", value.Line, value.ShortTag())
+}
+
+// MarshalYAML 自定义序列化，单元素输出字符串，多元素输出数组
+func (s StringSlice) MarshalYAML() (interface{}, error) {
+	if len(s) == 1 {
+		return s[0], nil
+	}
+	return []string(s), nil
+}
+
 type Conf struct {
-	HostsFiles []string          `yaml:"hosts_files"`
-	Hosts      map[string]string `yaml:"hosts"`
-	Cache      CacheConf         `yaml:"cache"`
-	Global     GlobalConf        `yaml:"global"`
+	HostsFiles []string               `yaml:"hosts_files"`
+	Hosts      map[string]StringSlice `yaml:"hosts"`
+	Cache      CacheConf              `yaml:"cache"`
+	Global     GlobalConf             `yaml:"global"`
 
 	Groups        map[string]Group          `yaml:"groups"`
 	DisableIPv6   bool                      `yaml:"disable_ipv6"`

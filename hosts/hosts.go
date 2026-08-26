@@ -24,39 +24,89 @@ type IDNSHosts interface {
 type hostPattern struct {
 	pattern string
 	reg     *regexp.Regexp
-	ip      ipInfo
+	ips     []ipInfo
+}
+
+func splitIPs(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return unicode.IsSpace(r) || r == ','
+	})
+}
+
+func containsIP(list []ipInfo, target ipInfo) bool {
+	for _, ip := range list {
+		if ip.val == target.val && ip._type == target._type {
+			return true
+		}
+	}
+	return false
 }
 
 func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
-	domainMap := make(map[string]ipInfo, len(conf.Hosts))
-	patterns := make([]hostPattern, 0, len(conf.Hosts))
-	load := func(host, ipStr string) error {
-		host = strings.ToLower(host)
-		ip := buildIPInfo(ipStr)
-		if ip == zeroIP {
-			return fmt.Errorf("parse %q to ip failed", ipStr)
+	domainMap := make(map[string][]ipInfo, len(conf.Hosts))
+	patternMap := make(map[string]*hostPattern, len(conf.Hosts))
+
+	addDomainIP := func(domain string, ip ipInfo) {
+		if !containsIP(domainMap[domain], ip) {
+			domainMap[domain] = append(domainMap[domain], ip)
 		}
-		if !strings.ContainsAny(host, "*?") {
-			domainMap[host] = ip
+	}
+
+	addPatternIP := func(host, patternHost string, reg *regexp.Regexp, ip ipInfo) {
+		if p, exists := patternMap[host]; exists {
+			if !containsIP(p.ips, ip) {
+				p.ips = append(p.ips, ip)
+			}
+			return
+		}
+		patternMap[host] = &hostPattern{
+			pattern: patternHost,
+			reg:     reg,
+			ips:     []ipInfo{ip},
+		}
+	}
+
+	load := func(host string, ipStrs ...string) error {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
 			return nil
 		}
-		// wildcard to regexp
-		host = strings.Replace(host, ".", "\\.", -1)
-		host = strings.Replace(host, "*", ".*", -1)
-		host = strings.Replace(host, "?", ".", -1)
-		reg, err := regexp.Compile("^" + host + "$")
-		if err != nil {
-			return fmt.Errorf("build host regexp %q failed: %w", host, err)
+		for _, rawIP := range ipStrs {
+			subIPs := splitIPs(rawIP)
+			if len(subIPs) == 0 {
+				continue
+			}
+			for _, ipStr := range subIPs {
+				ip := buildIPInfo(ipStr)
+				if ip == zeroIP {
+					return fmt.Errorf("parse %q to ip failed", ipStr)
+				}
+				if !strings.ContainsAny(host, "*?") {
+					addDomainIP(host, ip)
+					continue
+				}
+				// wildcard to regexp
+				patternHost := host
+				patternHost = strings.Replace(patternHost, ".", "\\.", -1)
+				patternHost = strings.Replace(patternHost, "*", ".*", -1)
+				patternHost = strings.Replace(patternHost, "?", ".", -1)
+				reg, err := regexp.Compile("^" + patternHost + "$")
+				if err != nil {
+					return fmt.Errorf("build host regexp %q failed: %w", host, err)
+				}
+				addPatternIP(host, patternHost, reg, ip)
+			}
 		}
-		patterns = append(patterns, hostPattern{pattern: host, reg: reg, ip: ip})
 		return nil
 	}
+
 	// parse hosts
-	for host, ipStr := range conf.Hosts {
-		if err := load(host, ipStr); err != nil {
+	for host, ips := range conf.Hosts {
+		if err := load(host, ips...); err != nil {
 			return nil, err
 		}
 	}
+
 	// parse hosts files
 	files := make([]*os.File, 0, len(conf.HostsFiles))
 	defer func() {
@@ -83,19 +133,40 @@ func NewDNSHosts(conf config.Conf) (IDNSHosts, error) {
 				continue
 			}
 			if ip := buildIPInfo(parts[0]); ip != zeroIP {
-				// linux style hosts file
+				// linux style hosts file: <ip> <domain1> <domain2> ...
 				for _, domain := range parts[1:] {
-					domainMap[domain] = ip
+					domain = strings.ToLower(strings.TrimSpace(domain))
+					if domain == "" {
+						continue
+					}
+					if strings.ContainsAny(domain, "*?") {
+						patternHost := domain
+						patternHost = strings.Replace(patternHost, ".", "\\.", -1)
+						patternHost = strings.Replace(patternHost, "*", ".*", -1)
+						patternHost = strings.Replace(patternHost, "?", ".", -1)
+						reg, err := regexp.Compile("^" + patternHost + "$")
+						if err != nil {
+							return nil, fmt.Errorf("build host regexp %q failed: %w", domain, err)
+						}
+						addPatternIP(domain, patternHost, reg, ip)
+					} else {
+						addDomainIP(domain, ip)
+					}
 				}
 				continue
 			}
-			if err = load(parts[0], parts[1]); err != nil {
+			if err = load(parts[0], parts[1:]...); err != nil {
 				return nil, fmt.Errorf("load hosts file %q error: %w", filename, err)
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			return nil, fmt.Errorf("load hosts file %q error: %w", filename, err)
 		}
+	}
+
+	patterns := make([]hostPattern, 0, len(patternMap))
+	for _, p := range patternMap {
+		patterns = append(patterns, *p)
 	}
 	sort.Slice(patterns, func(i, j int) bool {
 		if len(patterns[i].pattern) != len(patterns[j].pattern) {
@@ -131,6 +202,9 @@ func (i ipInfo) Record(host string) string {
 
 func buildIPInfo(val string) ipInfo {
 	ip := net.ParseIP(val)
+	if ip == nil {
+		return zeroIP
+	}
 	if ip.To4() != nil {
 		return ipInfo{val: val, _type: dns.TypeA}
 	} else if ip.To16() != nil {
@@ -141,7 +215,7 @@ func buildIPInfo(val string) ipInfo {
 
 // HostReader 管理hosts
 type HostReader struct {
-	domainMap map[string]ipInfo
+	domainMap map[string][]ipInfo
 	patterns  []hostPattern
 }
 
@@ -155,32 +229,42 @@ func (h *HostReader) Get(req *dns.Msg) *dns.Msg {
 		return nil
 	}
 
-	getIP := func(host string) (ipInfo, bool) {
+	getIPs := func(host string) ([]ipInfo, bool) {
 		if res, exists := h.domainMap[host]; exists {
 			return res, true
 		}
 		for _, pattern := range h.patterns {
 			if pattern.reg.MatchString(host) {
-				return pattern.ip, true
+				return pattern.ips, true
 			}
 		}
-		return zeroIP, false
+		return nil, false
 	}
-	ip, exists := getIP(host)
+	ips, exists := getIPs(host)
 	if !exists && strings.HasSuffix(host, ".") {
-		ip, exists = getIP(host[:len(host)-1])
+		ips, exists = getIPs(host[:len(host)-1])
 	}
-	if !exists || ip._type != qType {
+	if !exists {
 		return nil
 	}
-	rr, err := dns.NewRR(ip.Record(host))
-	if err != nil {
-		logrus.Errorf("build dns rr failed: %+v", err)
+
+	var answers []dns.RR
+	for _, ip := range ips {
+		if ip._type == qType {
+			rr, err := dns.NewRR(ip.Record(host))
+			if err != nil {
+				logrus.Errorf("build dns rr failed: %+v", err)
+				continue
+			}
+			answers = append(answers, rr)
+		}
+	}
+	if len(answers) == 0 {
 		return nil
 	}
 	resp := new(dns.Msg)
 	resp.SetReply(req)
-	resp.Answer = append(resp.Answer, rr)
+	resp.Answer = answers
 	return resp
 }
 

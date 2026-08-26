@@ -73,8 +73,8 @@ func Test_newHandle(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
 	defaultConf := config.Conf{
 		HostsFiles: nil,
-		Hosts: map[string]string{
-			"z.cn.": "1.1.1.1", "v6.cn.": "2001:db8:85a3::8a2e:370:7334",
+		Hosts: map[string]config.StringSlice{
+			"z.cn.": {"1.1.1.1"}, "v6.cn.": {"2001:db8:85a3::8a2e:370:7334"},
 		},
 		Cache:         config.CacheConf{},
 		Groups:        map[string]config.Group{"fallback": {}},
