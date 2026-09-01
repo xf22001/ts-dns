@@ -10,7 +10,7 @@
 
 ## 设计目标
 ### 灵活解析
-* 支持按ABP风格规则/`GFWList`对DNS请求进行分组
+* 支持按ABP风格规则/`GFWList`对DNS请求进行分组（支持本地文件与远程URL定时拉取更新）
 * 支持按CIDR对DNS请求进行重定向
 * 支持DNS over UDP/TCP/TLS/HTTPS、socks5代理、ECS；DoH上游域名支持解析A/AAAA记录
 * 支持将查询结果中的IPv4地址添加至IPSet
@@ -139,7 +139,7 @@
 
 ## 未来规划
 
-- [ ] 支持定期拉取最新gfwlist
+- [x] 支持定期拉取最新gfwlist
 - [ ] 支持http接口管理
 - [ ] 降低gfwlist的匹配优先级
 - [ ] DoT/GFWList域名解析自闭环

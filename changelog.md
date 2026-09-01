@@ -1,10 +1,11 @@
 # v1.0.0
 
+- [x] 优化GFWList启动拉取逻辑：本地已有规则时启动不重复下载，仅在无本地规则时立即拉取
 - [x] 优化DoH上游解析，支持域名A/AAAA、IPv4/IPv6 literal，并修复IPv6 TCP ping地址拼接
 - [x] 修复非法`gfwlist_url`可能导致进程崩溃的问题
 - [x] 从配置中移除`query_log`、`gfwlist`、`gfwlist_b64`项
 - [x] 移除针对`dirty`、`clean`组的特殊逻辑
 - [x] 支持为特定组指定`gfwlist`匹配策略、兜底匹配策略
-- [x] 收到`SIGNUP`信号时重载配置文件
+- [x] 收到`SIGHUP`信号时重载配置文件
 - [x] 支持非CNIP转发到指定组策略
 - [X] 完全重构代码

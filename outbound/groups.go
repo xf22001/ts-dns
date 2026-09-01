@@ -848,8 +848,10 @@ func (g *groupImpl) Start(resolver dns.Handler) {
 		go func() {
 			defer wg.Done()
 			defer tick.Stop()
-			// 首次启动时立即拉取
-			g.refreshGFWList()
+			// 仅在本地规则为空/未加载成功时，启动才立即拉取
+			if atomic.LoadPointer(&g.gfwList) == nil {
+				g.refreshGFWList()
+			}
 			for {
 				select {
 				case <-tick.C:

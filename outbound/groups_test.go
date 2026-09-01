@@ -2,14 +2,19 @@ package outbound
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/wolf-joe/ts-dns/config"
+	"github.com/wolf-joe/ts-dns/matcher"
 )
 
 func TestBuildGroups(t *testing.T) {
@@ -611,4 +616,58 @@ func TestHostCallerStats_CleanupExpiredHosts(t *testing.T) {
 	group.stateMu.RUnlock()
 	assert.False(t, oldExists)
 	assert.True(t, newExists)
+}
+
+func TestGroupStart_GFWListURL_SkipWhenAlreadyLoaded(t *testing.T) {
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		b64 := base64.StdEncoding.EncodeToString([]byte("google.com\n"))
+		_, _ = w.Write([]byte(b64))
+	}))
+	defer server.Close()
+
+	// 1. 本地规则已存在（模拟已从文件加载）
+	existingMatcher := matcher.NewABPByText("youtube.com\n")
+	group := &groupImpl{
+		name:          "test_gfwlist_exists",
+		gfwListURL:    server.URL,
+		gfwListUpdate: 10 * time.Hour,
+		stopCh:        make(chan struct{}),
+		stopped:       make(chan struct{}),
+		disableQTypes: map[uint16]bool{},
+	}
+	atomic.StorePointer(&group.gfwList, unsafe.Pointer(existingMatcher))
+
+	group.Start(nil)
+	time.Sleep(50 * time.Millisecond) // 等待协程启动
+	assert.Equal(t, int32(0), atomic.LoadInt32(&requestCount), "启动时若已有规则，不应立即请求远程 URL")
+	group.Stop()
+}
+
+func TestGroupStart_GFWListURL_FetchWhenEmpty(t *testing.T) {
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		b64 := base64.StdEncoding.EncodeToString([]byte("google.com\n"))
+		_, _ = w.Write([]byte(b64))
+	}))
+	defer server.Close()
+
+	// 2. 本地规则为空，启动时应立即拉取
+	group := &groupImpl{
+		name:          "test_gfwlist_empty",
+		gfwListURL:    server.URL,
+		gfwListUpdate: 10 * time.Hour,
+		stopCh:        make(chan struct{}),
+		stopped:       make(chan struct{}),
+		disableQTypes: map[uint16]bool{},
+	}
+
+	assert.True(t, atomic.LoadPointer(&group.gfwList) == nil)
+	group.Start(nil)
+	assert.Eventually(t, func() bool {
+		return atomic.LoadInt32(&requestCount) == 1 && atomic.LoadPointer(&group.gfwList) != nil
+	}, 1*time.Second, 20*time.Millisecond, "启动时若无规则，应立即请求远程 URL 并填充规则")
+	group.Stop()
 }
